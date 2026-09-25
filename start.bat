@@ -1,11 +1,20 @@
 @echo off
 setlocal enabledelayedexpansion
-title medreview 素材审阅系统
-rem 切换到 bat 所在目录：数据库、缓存、日志均保存在本目录下
+title 素材审阅系统
+rem 切换到本文件所在目录：数据库、缓存、日志均保存在这里
 cd /d "%~dp0"
 
+rem ====== 把文件夹拖到本文件图标上启动：路径作为参数 %1 传进来，直接开工，不再询问 ======
+set "ROOT="
+set "TOKEN="
+set "PORT="
+if not "%~1"=="" (
+  set "ROOT=%~1"
+  goto :check
+)
+
 echo ============================================================
-echo                 medreview 素材审阅系统
+echo                   素材审阅系统
 echo ------------------------------------------------------------
 echo   [1] 素材目录：将文件夹拖入本窗口后按回车，
 echo       也可以直接粘贴完整路径后按回车；
@@ -19,20 +28,27 @@ echo       若提示端口被占用，请更换其他端口（例如 8081）。
 echo ============================================================
 echo.
 
-set "ROOT="
 set /p "ROOT=请输入素材目录: "
 set "ROOT=!ROOT:"=!"
 echo.
 
-set "TOKEN="
 set /p "TOKEN=请设置下载口令: "
 set "TOKEN=!TOKEN:"=!"
 echo.
 
-set "PORT="
 set /p "PORT=请输入监听端口: "
 set "PORT=!PORT:"=!"
 echo.
+
+:check
+rem 目录要么留空（用上次的），要么必须真实存在且是文件夹（拖快捷方式/文件不行）
+if not "!ROOT!"=="" if not exist "!ROOT!" (
+  echo.
+  echo [错误] 素材目录不存在或不是文件夹：!ROOT!
+  echo 请把文件夹本身拖到本文件图标上，或检查路径后重新运行。
+  pause
+  exit /b 1
+)
 
 set "EXTRA="
 if not "!ROOT!"==""   set "EXTRA=!EXTRA! -root "!ROOT!""
