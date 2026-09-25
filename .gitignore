@@ -1,0 +1,29 @@
+# ---- 构建产物 ----
+*.exe
+*.exe.*
+*.bak*
+*.prev
+*.lnk
+*.syso
+
+# ---- 运行时产物（首次运行自动生成，含隐私：审阅结论、用户名）----
+*.db
+*.db-shm
+*.db-wal
+medreview.log
+urls.txt
+cache/
+sc/
+导出清单.csv
+打包清单_*.csv
+
+# ---- 内嵌依赖：ffmpeg / ffprobe（约 210 MB，构建前自行放入 tools/ffmpeg/）----
+tools/ffmpeg/
+
+# ---- 离线演示页：含本机绝对路径与个人照片，不入库 ----
+web_demo/
+
+# ---- 验收脚本目录：只提交脚本与说明，临时素材/运行目录全部忽略 ----
+_verify/**
+!_verify/*.py
+!_verify/*.md

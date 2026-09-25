@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>素材审阅 · 可下载</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/style.css">
+<script>
+/* ===== 手机版/电脑版判定（BEGIN · 本段在 review.html 与 download.html 里必须逐字一致） =====
+   不用窗口宽度判定：手机横屏有 932px 宽，任何宽度断点都会判错。
+   非可见（同步阻塞）执行，必须在浏览器首次绘制前跑完，否则会闪一下错布局。
+   ?ui=phone / ?ui=pc 可手动强制（记在 localStorage.mr_ui），?ui=auto 恢复自动。 */
+(function () {
+  var d = document, ua = navigator.userAgent || "";
+  var chMobile = !!(navigator.userAgentData && navigator.userAgentData.mobile);
+  var uaPhone = /iPhone|iPod|Android.*Mobile|Windows Phone|BlackBerry|BB10|Opera Mini|IEMobile/i.test(ua);
+  var uaTablet = /iPad|Android(?!.*Mobile)|Tablet|PlayBook|Silk/i.test(ua);
+  var touch = (navigator.maxTouchPoints || 0) > 0 || "ontouchstart" in window;
+  var coarse = window.matchMedia("(pointer: coarse)").matches;
+  var noHover = window.matchMedia("(hover: none)").matches;
+  var small = Math.min(screen.width, screen.height) <= 500;
+  var ov = "";
+  try {
+    var q = new URLSearchParams(location.search).get("ui");
+    if (q === "phone" || q === "pc") localStorage.setItem("mr_ui", q);
+    else if (q === "auto") localStorage.removeItem("mr_ui");
+    ov = localStorage.getItem("mr_ui") || "";
+  } catch (e) {}
+  var phone;
+  if (ov) phone = (ov === "phone");
+  else if (chMobile || uaPhone) phone = true;
+  else if (uaTablet) phone = false;
+  else phone = touch && coarse && noHover && small;
+  d.documentElement.classList.add(phone ? "is-phone" : "is-pc");
+  var portrait = function () {
+    d.documentElement.classList.toggle("portrait", window.innerHeight > window.innerWidth);
+  };
+  portrait();
+  window.addEventListener("resize", portrait);
+  window.addEventListener("orientationchange", function () { setTimeout(portrait, 60); });
+})();
+/* ===== 手机版/电脑版判定（END） ===== */
+</script>
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <div class="side-head">
+      <span>目录</span>
+      <span class="sub" id="stat"></span>
+    </div>
+    <div id="tree"></div>
+  </aside>
+
+  <div id="main">
+    <div id="toolbar">
+      <span class="mode-badge mode-dl" title="此页面可对已标记的文件打包 / 导出下载">下载模式 · 可标记 / 打包下载</span>
+      <span class="crumb" id="crumb">素材</span>
+      <span id="slot-cols"></span>
+      <span id="slot-filter"></span>
+      <button class="btn" id="btn-quality" title="切换网格和灯箱默认用压缩图还是原图">画质：压缩图</button>
+      <button class="btn" id="btn-parent" title="把上一层目录直属的照片也一起显示（标记/打包口径不变）">含父目录</button>
+      <button class="btn" id="claim-btn">认领此目录</button>
+      <button class="btn" id="btn-finish">完成审阅</button>
+      <span class="progress-text" id="who"></span>
+      <span class="spacer"></span>
+      <div id="tb-more">
+        <button class="btn" id="btn-all-keep" title="只作用于当前屏幕上看得见的文件">本页全部保留</button>
+        <button class="btn danger" id="btn-all-reject" title="只作用于当前屏幕上看得见的文件">本页全部不保留</button>
+        <button class="btn" id="btn-clear" title="只作用于当前屏幕上看得见的文件">清除本页标记</button>
+        <button class="btn" id="btn-folder-keep" title="把本目录（不含子目录）的全部文件一次性标为保留；会覆盖已有标记">本目录全部保留</button>
+        <button class="btn danger wide" id="btn-folder-reject" title="把本目录（不含子目录）的全部文件一次性标为不保留；会覆盖已有标记">本目录全部不保留</button>
+        <button class="btn danger wide" id="btn-clear-folder" title="清空这一个目录里全部文件的标记；不含子目录，不可撤销">清空本目录标记…</button>
+        <button class="btn" id="btn-root">选择素材目录</button>
+      </div>
+      <button class="btn" id="btn-help">说明</button>
+      <button class="btn" id="btn-more" title="更多操作">⋯</button>
+    </div>
+
+    <div id="dl-bar">
+      <span class="tag">下载</span>
+      <button class="btn primary" id="btn-zip">打包当前目录的保留文件</button>
+      <button class="btn" id="btn-zip-sub">打包（含子目录）</button>
+      <button class="btn" id="btn-zip-all">打包全部保留文件</button>
+      <button class="btn" id="btn-list">导出路径清单</button>
+      <button class="btn" id="btn-copy">导出到本机目录</button>
+      <span class="progress-text">打包只含标记为「保留」的文件，保留原始目录结构，边打包边下载</span>
+    </div>
+
+    <div id="scanbar"></div>
+
+    <div id="grid-wrap">
+      <div id="grid"></div>
+      <div id="empty" style="display:none">这个目录里没有符合条件的文件</div>
+    </div>
+  </div>
+</div>
+
+<div id="lightbox">
+  <div class="lb-top">
+    <span class="nm" id="lb-name"></span>
+    <button id="lb-close">关闭 (Esc)</button>
+  </div>
+  <div class="lb-body" id="lb-body"></div>
+  <div class="lb-side lb-left">
+    <button class="k">✓ 保留 <span class="kbd">(1)</span></button>
+    <button class="c">○ 不确定 <span class="kbd">(0)</span></button>
+    <button class="x">✕ 不保留 <span class="kbd">(2)</span></button>
+  </div>
+  <div class="lb-side lb-right">
+    <button id="lb-zin">放大 ＋</button>
+    <button id="lb-zout">缩小 －</button>
+  </div>
+  <div class="lb-pager">
+    <button id="lb-prev">‹</button>
+    <span id="lb-count"></span>
+    <button id="lb-orig" title="这次用原文件显示（更清晰，加载慢）；翻页后自动回到预览版">看原图</button>
+    <button id="lb-next">›</button>
+  </div>
+</div>
+
+<div id="modal">
+  <div class="modal-box">
+    <div class="modal-head">
+      <span id="modal-title"></span>
+      <button class="btn" id="modal-x">关闭</button>
+    </div>
+    <div class="modal-body" id="modal-body"></div>
+  </div>
+</div>
+
+<div id="name-gate">
+  <div class="ng-box">
+    <h3>请输入你的批注名</h3>
+    <p class="sub">用于区分多人审阅。请填一个唯一的名字，本程序关闭后失效。</p>
+    <div class="ng-row">
+      <input id="name-input" type="text" inputmode="text" autocomplete="off"
+             enterkeyhint="done" maxlength="20" placeholder="例如：小李">
+      <select id="name-hist"><option value="">最近用过…</option></select>
+    </div>
+    <button class="btn primary" id="name-ok" disabled>开始审阅</button>
+  </div>
+</div>
+
+<div id="rotate-gate">
+  <div class="rotate-box">
+    <svg class="rotate-icon" viewBox="0 0 64 40" aria-hidden="true">
+      <rect x="8" y="4" width="20" height="32" rx="3" fill="none" stroke="currentColor" stroke-width="2.5"/>
+      <path d="M36 20c0-8 6-13 13-13 6 0 11 4 11 10" fill="none" stroke="currentColor"
+            stroke-width="2.5" stroke-linecap="round" transform="translate(-3 0)"/>
+      <path d="M54 12l4 6 4-6" fill="none" stroke="currentColor" stroke-width="2.5"
+            stroke-linecap="round" stroke-linejoin="round" transform="translate(-3 0)"/>
+    </svg>
+    <p>请横屏使用</p>
+    <p class="sub">本工具只针对横屏设计</p>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="/app.js"></script>
+<script>initApp("download");</script>
+</body>
+</html>
