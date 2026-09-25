@@ -1,0 +1,20 @@
+# 行尾规范：Windows 批处理必须是 CRLF，否则 cmd 解析会乱（中文提示变乱码、命令被截断）
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+
+# 其他文本文件统一 LF
+*.go   text eol=lf
+*.html text eol=lf
+*.js   text eol=lf
+*.css  text eol=lf
+*.md   text eol=lf
+*.py   text eol=lf
+*.mod  text eol=lf
+*.sum  text eol=lf
+
+# 二进制：不参与换行转换、不参与 diff
+*.exe binary
+*.db  binary
+*.jpg binary
+*.png binary
+*.zip binary
