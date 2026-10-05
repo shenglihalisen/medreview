@@ -3,6 +3,8 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"log"
+	"os"
 	"path/filepath"
 
 	_ "modernc.org/sqlite"
@@ -54,6 +56,31 @@ CREATE TABLE IF NOT EXISTS meta (
 	k TEXT PRIMARY KEY,
 	v TEXT NOT NULL
 );
+
+-- 质量自动检测（重复/损坏/空镜/镜头脏污）。只作辅助提示，绝不影响 review.decision。
+-- 落库失败/重扫后旧结论按 size+mtime+qc_version 整体失效重算。
+-- detail 是 qc.QCResult 的 JSON（含镜头脏污框坐标等），前端直接读。
+CREATE TABLE IF NOT EXISTS qc (
+	file_id    INTEGER PRIMARY KEY,
+	flags     INTEGER NOT NULL DEFAULT 0,
+	detail    TEXT NOT NULL DEFAULT '',
+	dup_hash  TEXT NOT NULL DEFAULT '',
+	device    TEXT NOT NULL DEFAULT '',
+	shoot_key TEXT NOT NULL DEFAULT '',
+	size      INTEGER NOT NULL DEFAULT 0,
+	mtime     INTEGER NOT NULL DEFAULT 0,
+	qc_version INTEGER NOT NULL DEFAULT 0,
+	updated_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_qc_duphash ON qc(dup_hash);
+CREATE INDEX IF NOT EXISTS idx_qc_folder ON qc(file_id);
+
+-- 见过的批注名，给前端「最近用过…」下拉用。
+-- 存库而不是放进程内存：关掉程序再打开也还记得（用户 2026-10-01 明确要求）。
+CREATE TABLE IF NOT EXISTS known_user (
+	name      TEXT PRIMARY KEY,
+	last_used INTEGER NOT NULL
+);
 `
 
 func openDB(path string) (*sql.DB, error) {
@@ -74,7 +101,76 @@ func openDB(path string) (*sql.DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("建表失败: %w", err)
 	}
+	if err := ensureColumns(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("补列失败: %w", err)
+	}
 	return db, nil
+}
+
+// wipeDB 把整库清干净：主文件 + WAL + shm 三件套一起删。
+//
+// 这个工具的定位是「一次一批素材、评完就走」的临时审阅台，不是长期账本 ——
+// 上次的素材根目录、标记、QC 结果本就该随窗口一起消失。
+// 否则第二次打开看到的是上一轮的老界面（实测上次的 root_path 会被直接复用，
+// review/qc 表还留着上一轮的 132 个文件、160 条 QC）。
+//
+// ⚠️ 三个文件必须一起删：数据全压在 -wal 里（实测主文件 4 KB / WAL 3.8 MB），
+// 只删主文件的话 SQLite 会把 WAL 重放回来，等于根本没清。
+//
+// ⚠️ 调用时机有讲究：Windows 上文件被句柄占着是删不掉的，
+// 所以要么等 db.Close() 之后再调，要么在 openDB 之前调（此刻还没人开这个文件）。
+func wipeDB(path string) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return
+	}
+	base := filepath.Clean(abs)
+	for _, p := range []string{base, base + "-wal", base + "-shm"} {
+		if err := os.Remove(p); err == nil {
+			log.Printf("已清除 %s", filepath.Base(p))
+		}
+	}
+}
+
+// ensureColumns 给**老库**补新列。CREATE TABLE IF NOT EXISTS 对已经存在的表不会加列，
+// 所以每次加列都要在这里登记一条；新库走 schema 建表时列已经在了，这里的 ALTER 会因
+// 列已存在而报错，所以先查 PRAGMA table_info 再决定补不补。
+func ensureColumns(db *sql.DB) error {
+	need := []struct{ table, name, ddl string }{
+		{"qc", "device", "ALTER TABLE qc ADD COLUMN device TEXT NOT NULL DEFAULT ''"},
+		{"qc", "shoot_key", "ALTER TABLE qc ADD COLUMN shoot_key TEXT NOT NULL DEFAULT ''"},
+	}
+	for _, c := range need {
+		rows, err := db.Query("PRAGMA table_info(" + c.table + ")")
+		if err != nil {
+			return err
+		}
+		has := false
+		for rows.Next() {
+			var cid int
+			var name, typ string
+			var notNull, pk int
+			var dflt any
+			if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
+				rows.Close()
+				return err
+			}
+			if name == c.name {
+				has = true
+			}
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if !has {
+			if _, err := db.Exec(c.ddl); err != nil {
+				return fmt.Errorf("补列 %s.%s: %w", c.table, c.name, err)
+			}
+		}
+	}
+	return nil
 }
 
 func metaGet(db *sql.DB, k string) string {

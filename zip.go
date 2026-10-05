@@ -2,6 +2,8 @@ package main
 
 import (
 	"archive/zip"
+	"encoding/csv"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"medreview/qc"
 )
 
 // handleZip 流式打包"标记为保留"的文件。
@@ -254,6 +258,105 @@ func (h *Handler) handleExportList(w http.ResponseWriter, r *http.Request) {
 	for _, f := range files {
 		fmt.Fprintln(w, h.store.absPath(f.RelPath))
 	}
+}
+
+// handleQCReport 导出 QC 问题清单 CSV：损坏/重复/空镜/镜头脏污/模糊/欠曝/过曝/噪点
+// 一个文件可能同时命中多种，问题列用「、」连。损坏排最前（最要紧的放最前看）。
+// 必须过 canDownload：和 /api/export 同类出口，清单里有本机绝对路径。
+func (h *Handler) handleQCReport(w http.ResponseWriter, r *http.Request) {
+	if !h.canDownload(r) {
+		http.Error(w, "当前页面无下载权限", http.StatusForbidden)
+		return
+	}
+	folderID, _ := strconv.ParseInt(r.URL.Query().Get("folder"), 10, 64)
+	if folderID <= 0 {
+		http.Error(w, "缺少 folder 参数", http.StatusBadRequest)
+		return
+	}
+	recursive := r.URL.Query().Get("recursive") == "1"
+	ids := []int64{folderID}
+	if recursive {
+		var err error
+		ids, err = h.store.FolderDescendants(folderID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	issues, err := h.store.QCIssues(ids)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="qc-report.csv"`)
+	// UTF-8 BOM：没有它 Excel 双击打开中文全是乱码
+	w.Write([]byte{0xEF, 0xBB, 0xBF})
+	cw := csv.NewWriter(w)
+	cw.Write([]string{"文件路径", "文件名", "问题", "保留状态"})
+	states := map[int]string{0: "未定", 1: "保留", 2: "不保留"}
+	for _, it := range issues {
+		// csvSafe：复用 manifest.go 的现成实现（防 Excel 公式注入，比新写的更全）
+		cw.Write([]string{csvSafe(h.store.absPath(it.RelPath)), csvSafe(it.Name),
+			strings.Join(qcIssueTexts(it.Flags, it.Detail), "、"),
+			states[it.Decision]})
+	}
+	cw.Flush()
+}
+
+// qcIssueTexts 把 QC 位掩码翻译成人能读的问题文字（顺序：损坏优先，其余按位序）。
+func qcIssueTexts(flags int, detail string) []string {
+	var out []string
+	if flags&qc.FlagCorrupted != 0 {
+		out = append(out, "损坏")
+	}
+	if flags&qc.FlagDup != 0 {
+		out = append(out, "重复")
+	}
+	if flags&qc.FlagBlank != 0 {
+		out = append(out, "空镜")
+	}
+	if flags&qc.FlagLensDirt != 0 {
+		out = append(out, "镜头脏污")
+	}
+	if flags&qc.FlagBlur != 0 {
+		out = append(out, "模糊")
+	}
+	if flags&qc.FlagExposure != 0 {
+		under, over := exposureDir(detail)
+		switch {
+		case over:
+			out = append(out, "过曝")
+		case under:
+			out = append(out, "欠曝")
+		default:
+			out = append(out, "曝光")
+		}
+	}
+	if flags&qc.FlagNoise != 0 {
+		out = append(out, "噪点")
+	}
+	if flags&qc.FlagShake != 0 {
+		out = append(out, "抖动")
+	}
+	if len(out) == 0 {
+		out = append(out, "未知")
+	}
+	return out
+}
+
+// exposureDir 从 detail JSON 里读出曝光问题的方向（欠曝还是过曝）。
+func exposureDir(detail string) (under, over bool) {
+	var res struct {
+		Exposure *struct {
+			Under bool `json:"under"`
+			Over  bool `json:"over"`
+		} `json:"exposure"`
+	}
+	if json.Unmarshal([]byte(detail), &res) == nil && res.Exposure != nil {
+		return res.Exposure.Under, res.Exposure.Over
+	}
+	return false, false
 }
 
 var errNotDir = errors.New("指定路径不是目录")

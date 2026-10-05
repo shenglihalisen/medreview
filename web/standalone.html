@@ -75,6 +75,15 @@ html, body {
 .tree-row.active { background: var(--primary-soft); color: var(--primary); }
 .tree-row .tw { width: 16px; text-align: center; color: var(--text-faint); flex-shrink: 0; font-size: 11px; }
 .tree-row .tn { overflow: hidden; text-overflow: ellipsis; flex: 1; }
+/* 虚拟节点「（直属文件）」：不是真目录，弱化显示（斜体+浅色），和真实目录区分开 */
+.tree-row.tree-virtual .tn { font-style: italic; color: var(--text-faint); }
+.tree-row.tree-virtual:hover { background: #f6f7f9; }
+/* 灯箱里的 QC 徽标条：独立一行插在 .lb-top 与 .lb-body 之间（不能塞进 .lb-top，
+   那是横排 flex 会挤坏布局）。黑底上徽标用原浅色底 + 深字，对比足够。
+   用户反馈还嫌小（2026-10-01）：字号 14→17、加厚内边距。 */
+#lb-qc { display: flex; gap: 10px; padding: 8px 16px 4px; flex-wrap: wrap; }
+#lb-qc .qc-lb { font-size: 17px; font-weight: 700; padding: 4px 14px; border-radius: 6px; color: #1a1a1a; }
+#lb-qc .qc-lb.qc-dirt, #lb-qc .qc-lb.qc-noise { color: #fff !important; }
 .tree-row .tc {
   font-size: 11px;
   color: var(--text-faint);
@@ -110,6 +119,13 @@ html, body {
   flex-wrap: wrap;
 }
 .crumb { font-weight: 600; overflow: hidden; text-overflow: ellipsis; max-width: 340px; white-space: nowrap; }
+.mode-badge {
+  flex: none; padding: 4px 12px; border-radius: 999px;
+  font-size: 12px; font-weight: 600; white-space: nowrap; user-select: none;
+}
+.mode-badge.mode-dl     { background: var(--keep-soft); color: var(--keep); border: 1px solid #b9e3c9; }
+.mode-badge.mode-review { background: var(--primary-soft); color: var(--primary); border: 1px solid #c3d7f7; }
+html.is-phone .mode-badge { padding: 3px 9px; font-size: 11px; }
 .spacer { flex: 1; }
 .seg { display: flex; border: 1px solid var(--border-strong); border-radius: 6px; overflow: hidden; }
 .seg button {
@@ -215,6 +231,23 @@ select, input[type=text] {
   position: absolute; left: 4px; top: 4px; background: rgba(24,110,60,.85); color: #fff;
   font-size: 10px; padding: 1px 5px; border-radius: 4px;
 }
+/* 质量自动检测（QC）徽标：右上角竖排小角标，纯辅助提示，不参与人工 decision。
+   颜色区分四类：重复/损坏/空镜为警示黄橙，镜头脏污为红。 */
+.qc-stack {
+  position: absolute; right: 4px; top: 4px; z-index: 3;
+  display: none; flex-direction: column; align-items: flex-end; gap: 2px;
+}
+/* 用户反馈徽标太小看不清（2026-10-01）：字号 10→13、内边距加厚 */
+.qc-stack span { color: #1a1a1a; font-size: 13px; padding: 2px 8px; border-radius: 5px; font-weight: 700; }
+.qc-dup { background: #ffd54a; }
+.qc-corrupt { background: #ff9d3a; }
+.qc-blank { background: #ffe08a; }
+.qc-dirt { background: #ff5a5a; color: #fff !important; }
+/* 后加的三个：模糊=紫、曝光=青（区分欠曝/过曝见徽标文字）、噪点=灰紫 */
+.qc-blur { background: #b98cff; }
+.qc-exposure { background: #4fd1e0; }
+.qc-noise { background: #9aa0b5; color: #fff !important; }
+.qc-shake { background: #7fe3a8; }
 #empty { padding: 60px 0; text-align: center; color: var(--text-faint); }
 
 /* ---------- 灯箱 ---------- */
@@ -227,7 +260,10 @@ select, input[type=text] {
 .lb-top .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 .lb-top button { background: rgba(255,255,255,.12); border: 0; color: #fff; border-radius: 6px; padding: 5px 12px; cursor: pointer; font: inherit; font-size: 13px; }
 .lb-top button:hover { background: rgba(255,255,255,.22); }
-.lb-body { flex: 1; display: flex; align-items: center; justify-content: center; overflow: hidden; padding: 0 96px; }
+/* position:relative 是给脏点覆盖层用的：覆盖层 absolute 铺满本层，
+   且 img.offsetLeft/Top 也是相对本层量的（layoutDirt 依赖这点）。
+   .lb-side 是 #lightbox 的直接子元素、不是本层的子元素，所以不受影响。 */
+.lb-body { flex: 1; display: flex; align-items: center; justify-content: center; overflow: hidden; padding: 0 96px; position: relative; }
 .lb-body img {
   max-width: 100%; max-height: 100%; object-fit: contain;
   transform-origin: center center; will-change: transform;
@@ -238,6 +274,18 @@ select, input[type=text] {
 .lb-body video {
   max-width: 100%; max-height: 100%; background: #000;
   transform-origin: center center; touch-action: none; will-change: transform;
+}
+/* 镜头脏污覆盖层：铺满 .lb-body 的兄弟层，位置由 JS 按图片实际显示矩形算（layoutDirt），
+   缩放/平移时由 JS 复制图片的 transform（syncDirtTransform）。
+   ⚠️ 不把 img 包进这个层里 —— 那样 img 的百分比 max-height 会失效（见 lbMedia 注释）。 */
+.lb-dirt-layer {
+  position: absolute; inset: 0; pointer-events: none; z-index: 1;
+  transform-origin: center center; will-change: transform;
+}
+/* 镜头脏污框：半透明红色描边 */
+.lb-dirt {
+  position: absolute; box-sizing: border-box;
+  border: 2px solid rgba(255,70,70,.95); background: rgba(255,40,40,.18);
 }
 /* 左右两列操作按钮：左边标记、右边缩放。居中垂直排列。 */
 .lb-side {
@@ -295,28 +343,6 @@ kbd { background: #f0f2f5; border: 1px solid var(--border-strong); border-bottom
   font-size: 13px; z-index: 300; opacity: 0; transition: opacity .2s; pointer-events: none;
 }
 .toast.on { opacity: 1; }
-
-.con-sec { margin-bottom: 14px; }
-.con-sec > .con-t { font-size: 12px; color: var(--text-faint); margin-bottom: 6px; }
-.con-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
-.con-url {
-  flex: 1; min-width: 0; font: 12px/1.5 Consolas, "Courier New", monospace;
-  background: #f0f2f5; border: 1px solid var(--border); border-radius: 6px;
-  padding: 5px 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  user-select: all; cursor: text;
-}
-.con-token {
-  font: 600 15px/1.5 Consolas, "Courier New", monospace; letter-spacing: 1px;
-  background: var(--warn-soft); border: 1px solid #f0d9b0; border-radius: 6px;
-  padding: 6px 10px; user-select: all;
-}
-.con-log {
-  height: 220px; overflow: auto; background: #1f2329; color: #d7dce3;
-  border-radius: 6px; padding: 8px 10px;
-  font: 12px/1.55 Consolas, "Courier New", monospace;
-  white-space: pre-wrap; word-break: break-all;
-}
-.con-log .dim { color: #8f959e; }
 
 /* ---------- 名字门禁（网页内弹窗，替代原生 prompt） ---------- */
 #name-gate {
@@ -457,6 +483,7 @@ html.is-phone #name-ok { min-height: 44px; }
 
   <div id="main">
     <div id="toolbar">
+      <span class="mode-badge mode-review" title="此页面仅用于标记，不能下载">审阅模式 · 只读标记</span>
       <span class="crumb" id="crumb">素材</span>
       <span id="slot-cols"></span>
       <span id="slot-filter"></span>
@@ -470,6 +497,8 @@ html.is-phone #name-ok { min-height: 44px; }
         <button class="btn" id="btn-all-keep" title="只作用于当前屏幕上看得见的文件">本页全部保留</button>
         <button class="btn danger" id="btn-all-reject" title="只作用于当前屏幕上看得见的文件">本页全部不保留</button>
         <button class="btn" id="btn-clear" title="只作用于当前屏幕上看得见的文件">清除本页标记</button>
+        <button class="btn" id="btn-folder-keep" title="把本目录（不含子目录）的全部文件一次性标为保留；会覆盖已有标记">本目录全部保留</button>
+        <button class="btn danger wide" id="btn-folder-reject" title="把本目录（不含子目录）的全部文件一次性标为不保留；会覆盖已有标记">本目录全部不保留</button>
         <button class="btn danger wide" id="btn-clear-folder" title="清空这一个目录里全部文件的标记；不含子目录，不可撤销">清空本目录标记…</button>
         <button class="btn" id="btn-root">选择素材目录</button>
       </div>
@@ -590,6 +619,7 @@ html.is-phone #name-ok { min-height: 44px; }
     // 「完成审阅」用：非 null 时灯箱只看这个数组，而不是当前目录的 S.items
     lbOverride: null,
     lbTitle: "",
+    lbHideDirt: false, // 灯箱里隐藏 QC 问题框（H 键切换，偏好记住）
     page: 60,
     claimedBy: "",
     canDownload: false,
@@ -740,6 +770,7 @@ html.is-phone #name-ok { min-height: 44px; }
     try { S.withParent = localStorage.getItem("mr_parent") !== "0"; } catch (e) {}
     // 画质偏好（压缩图 / 原图）
     try { S.quality = localStorage.getItem("mr_quality") === "orig" ? "orig" : "preview"; } catch (e) {}
+    try { S.lbHideDirt = localStorage.getItem("mr_hidedirt") === "1"; } catch (e) {}
 
     // 每次打开/刷新都必须重新登记批注名，且不能跳过：
     // 不读缓存、不写名字缓存（cookie 只作服务端兜底），刷新就一定重填。
@@ -860,12 +891,14 @@ html.is-phone #name-ok { min-height: 44px; }
 
     // 筛选
     var f = document.createElement("select");
-    [["all", "全部"], ["pending", "未审阅"], ["keep", "已保留"], ["reject", "不保留"], ["image", "仅图片"], ["video", "仅视频"]]
+    [["all", "全部"], ["pending", "未审阅"], ["keep", "已保留"], ["reject", "不保留"], ["image", "仅图片"], ["video", "仅视频"],
+     ["qcdup", "仅重复"], ["qcissue", "仅问题件"]]
       .forEach(function (p) {
         var o = document.createElement("option");
         o.value = p[0]; o.textContent = p[1];
         f.appendChild(o);
       });
+    f.value = S.filter;   // 别让下拉框和实际筛选条件对不上
     f.onchange = function () { S.filter = f.value; reload(); };
     $("slot-filter").appendChild(f);
 
@@ -968,8 +1001,46 @@ html.is-phone #name-ok { min-height: 44px; }
     if (S.expanded.has(n.id)) {
       var kids = S.treeChildren.get(n.id) || [];
       kids.forEach(function (k) { box.appendChild(treeRow(k, depth + 1)); });
+      // 虚拟节点「（直属文件）」：这个目录自己名下还有一批不在任何子文件夹里的
+      // 照片/视频时，树里给它们一个明确的入口（不然只能靠右侧网格才能看到）。
+      if (n.selfTotal > 0 && n.hasChildren) {
+        box.appendChild(virtualRow(n, depth + 1));
+      }
     }
     return box;
+  }
+
+  // 树里的虚拟行：代表"本目录直属的文件"。点击行为和点目录名一样
+  // （/api/files?folder=X 本来就只返回直属文件），只是给散落文件一个看得见的入口。
+  // 选中态和目录行一致：打开的就是这个目录时也高亮。
+  function virtualRow(n, depth) {
+    var row = document.createElement("div");
+    row.className = "tree-row tree-virtual" + (n.id === S.folderId ? " active" : "");
+    row.style.paddingLeft = (4 + depth * 14) + "px";
+    row.title = "直接放在「" + n.name + "」下面、不在任何子文件夹里的文件";
+
+    var tn = document.createElement("span");
+    tn.className = "tn";
+    tn.textContent = "（直属文件 " + n.selfTotal + "）";
+    row.appendChild(tn);
+
+    var tc = document.createElement("span");
+    tc.className = "tc";
+    tc.textContent = String(n.selfTotal);
+    row.appendChild(tc);
+
+    // 直属文件和大文件夹共用一个认领（认领目录 = 只锁直属文件）——
+    // 被认领时在虚拟行也标出来，"直属文件被锁"一眼可见
+    if (n.claimedBy) {
+      var ow = document.createElement("span");
+      ow.className = "owner";
+      ow.textContent = n.claimedBy === S.user ? "我" : n.claimedBy;
+      ow.title = "直属文件已被 " + (n.claimedBy === S.user ? "你" : n.claimedBy) + " 认领";
+      row.appendChild(ow);
+    }
+
+    row.onclick = function () { selectFolder(n.id); };
+    return row;
   }
 
   function selectFolder(id) {
@@ -1017,17 +1088,17 @@ html.is-phone #name-ok { min-height: 44px; }
     // 表现为"按钮点不动"。请求进行中的锁定由 claimBtn.onclick 自己负责。
     el.claimBtn.disabled = false;
     if (!S.claimedBy) {
-      el.claimBtn.textContent = "认领此目录";
+      el.claimBtn.textContent = "认领（仅直属文件）";
       el.claimBtn.className = "btn attention";
-      el.claimBtn.title = "认领后其他人只能查看，你才有权修改";
+      el.claimBtn.title = "认领后只锁定本目录直属的文件，子文件夹不受影响，其他人仍可认领子文件夹";
     } else if (S.claimedBy === S.user) {
       el.claimBtn.textContent = "释放认领（我）";
       el.claimBtn.className = "btn danger";
-      el.claimBtn.title = "你在审阅这个目录，点一下可释放";
+      el.claimBtn.title = "你认领的是本目录直属的文件（不含子文件夹），点一下可释放";
     } else {
       el.claimBtn.textContent = S.claimedBy + " 已认领";
       el.claimBtn.className = "btn";
-      el.claimBtn.title = "已被 " + S.claimedBy + " 认领，你只能查看";
+      el.claimBtn.title = "已被 " + S.claimedBy + " 认领（仅直属文件），你只能查看；子文件夹不受影响";
     }
   }
 
@@ -1091,6 +1162,42 @@ html.is-phone #name-ok { min-height: 44px; }
     b.className = cls;
     b.textContent = txt;
     return b;
+  }
+
+  // 质量自动检测（QC）位掩码：bit0=重复 bit1=损坏 bit2=空镜 bit3=镜头脏污
+  // bit4=模糊 bit5=曝光 bit6=噪点
+  function qcFlagList(qc) {
+    if (!qc || !qc.flags) return [];
+    var out = [];
+    if (qc.flags & 1) out.push(["重复", "qc-dup"]);
+    if (qc.flags & 2) out.push(["损坏", "qc-corrupt"]);
+    if (qc.flags & 4) out.push(["空镜", "qc-blank"]);
+    if (qc.flags & 8) out.push(["脏污", "qc-dirt"]);
+    if (qc.flags & 16) out.push(["模糊", "qc-blur"]);
+    // 曝光单独显示方向（欠曝/过曝），比笼统的"曝光"有用
+    if (qc.flags & 32) {
+      out.push([qc.expOver ? "过曝" : qc.expUnder ? "欠曝" : "曝光", "qc-exposure"]);
+    }
+    if (qc.flags & 64) out.push(["噪点", "qc-noise"]);
+    if (qc.flags & 128) out.push(["抖动", "qc-shake"]);
+    return out;
+  }
+
+  // 把 QC 徽标画进缩略图右上角。qc 为空时无徽标（容器隐藏）。
+  // 图片和视频都画：视频是先抽代表帧再测的，判据一样。
+  function renderQCBadges(thumb, f) {
+    if (!thumb || (f.kind !== 1 && f.kind !== 2)) return;
+    var stack = thumb.querySelector(".qc-stack");
+    if (!stack) {
+      stack = document.createElement("div");
+      stack.className = "qc-stack";
+      thumb.appendChild(stack);
+    }
+    stack.innerHTML = "";
+    qcFlagList(f.qc).forEach(function (p) {
+      stack.appendChild(mkBadge(p[0], p[1]));
+    });
+    stack.style.display = stack.children.length ? "flex" : "none";
   }
 
   function updateParentBtn() {
@@ -1293,6 +1400,7 @@ html.is-phone #name-ok { min-height: 44px; }
         attach(0);
       }, 500);
     }
+    renderQCBadges(thumb, f);
     card.appendChild(thumb);
 
     var bar = document.createElement("div");
@@ -1495,7 +1603,54 @@ html.is-phone #name-ok { min-height: 44px; }
     if (Z.ty < -maxY) Z.ty = -maxY;
   }
 
+  // 返回当前灯箱里被缩放/平移的元素。**必须**是 img / video 本身：
+  // 它们直接挂在定高的 .lb-body 下，max-width/max-height:100% 才有意义。
+  // ⚠️ 别把它们包进一层 div —— 那层高度是 auto，百分比 max-height 会解析成 none，
+  // 图片就按原始尺寸渲染、被 overflow:hidden 裁掉（项目里视频踩过一模一样的坑）。
+  // 脏点框因此改用独立的覆盖层（见 layoutDirt / syncDirtTransform）。
   function lbMedia() { return el.lbBody.querySelector("img, video"); }
+
+  // 脏点覆盖层随图片缩放/平移：把图片的 transform 原样复制给覆盖层。
+  // 两者中心重合（图片在 .lb-body 里居中、覆盖层铺满 .lb-body），
+  // 所以同样的 transform 会让框精确跟着图片走。
+  function syncDirtTransform() {
+    var layer = el.lbBody.querySelector(".lb-dirt-layer");
+    if (!layer) return;
+    var m = lbMedia();
+    layer.style.transform = m ? m.style.transform : "";
+  }
+
+  // 把脏点框摆到图片**实际显示的矩形**上。
+  // 图片是 object-fit 缩放后居中的，框不能按 .lb-body 的百分比算，
+  // 必须按 img 的 offset 矩形换算（所以要在 load 之后量）。
+  function layoutDirt() {
+    var layer = el.lbBody.querySelector(".lb-dirt-layer");
+    if (!layer) return;
+    var f = lbList()[S.lbIndex];
+    var boxes = (f && f.qc && (f.qc.flags & 8) && f.qc.boxes) ? f.qc.boxes : [];
+    if (S.lbHideDirt) boxes = []; // H 键隐藏（偏好记住，按 H 恢复）
+    var img = el.lbBody.querySelector("img");
+    layer.innerHTML = "";
+    if (!img || !img.offsetWidth || !boxes.length) {
+      layer.style.display = "none";
+      return;
+    }
+    layer.style.display = "block";
+    var L = img.offsetLeft, T = img.offsetTop, W = img.offsetWidth, H = img.offsetHeight;
+    boxes.forEach(function (b) {
+      var d = document.createElement("div");
+      d.className = "lb-dirt";
+      d.style.left = (L + b.x * W) + "px";
+      d.style.top = (T + b.y * H) + "px";
+      d.style.width = (b.w * W) + "px";
+      d.style.height = (b.h * H) + "px";
+      layer.appendChild(d);
+    });
+    syncDirtTransform();
+  }
+
+  // SSE 异步收到某张图的 QC 结果、且灯箱正好开在它上面时，重画脏点框。
+  function updateLbDirt() { layoutDirt(); }
 
   function applyZoom() {
     var m = lbMedia();
@@ -1504,6 +1659,7 @@ html.is-phone #name-ok { min-height: 44px; }
     if (s <= ZMIN + 0.001) { Z.s = ZMIN; Z.tx = 0; Z.ty = 0; s = ZMIN; }
     clampPan();
     m.style.transform = "translate(" + Z.tx + "px," + Z.ty + "px) scale(" + s + ")";
+    syncDirtTransform();   // 脏点框跟着图片一起缩放/平移
     updateZoomButtons();
   }
 
@@ -1569,6 +1725,8 @@ html.is-phone #name-ok { min-height: 44px; }
   function closeLightbox() {
     el.lightbox.classList.remove("on");
     el.lbBody.innerHTML = "";
+    var qcb = document.getElementById("lb-qc");
+    if (qcb) qcb.remove();   // 徽标条跟着关，不留游离节点
     resetZoom();
     S.lbIndex = -1;
     S.lbOverride = null;
@@ -1583,10 +1741,35 @@ html.is-phone #name-ok { min-height: 44px; }
     resetZoom();   // 每次切图都会重建 img，缩放必须重置
     el.lbName.textContent = (S.lbTitle ? S.lbTitle + "  ·  " : "") + f.name + "  (" + fmtSize(f.size) + ")";
     el.lbBody.innerHTML = "";
+    // 灯箱里的 QC 徽标条：网格卡片太小看不清，放大图时问题类型要跟着文件走。
+    // ⚠️ 挂载点必须是 .lb-top 的**兄弟**（lb-body 之前），不能塞进 .lb-top ——
+    // 那是横排 flex（文件名 flex:1 + 关闭按钮），塞进去徽标条会被压扁、布局挤坏。
+    var old = document.getElementById("lb-qc");
+    if (old) old.remove();
+    var flags = qcFlagList(f.qc);
+    if (flags.length && el.lbBody.parentNode) {
+      var bar = document.createElement("div");
+      bar.id = "lb-qc";
+      flags.forEach(function (it) {
+        var b = document.createElement("span");
+        b.className = "qc-lb " + it[1];
+        b.textContent = it[0];
+        bar.appendChild(b);
+      });
+      el.lbBody.parentNode.insertBefore(bar, el.lbBody);
+    }
     if (f.kind === 1) {
+      // 图片**直接**挂到定高的 .lb-body 下（不能包一层，原因见 lbMedia 的注释）
       var img = document.createElement("img");
+      // 脏点框要按图片实际显示矩形定位，得等尺寸出来；setImg 的回调是失败回调，不是 load
+      img.onload = function () { layoutDirt(); };
       setImg(img, mediaURL(f, S.lbOrig), function () {});
       el.lbBody.appendChild(img);
+      // 脏点覆盖层：铺满 .lb-body 的兄弟层，框按像素摆到图片矩形上
+      var layer = document.createElement("div");
+      layer.className = "lb-dirt-layer";
+      layer.style.display = "none";
+      el.lbBody.appendChild(layer);
     } else {
       var box = document.createElement("div");
       box.style.cssText = "height:100%;display:flex;align-items:center;justify-content:center;" +
@@ -1857,7 +2040,11 @@ html.is-phone #name-ok { min-height: 44px; }
       render();
       if (el.wrap.scrollTop + el.wrap.clientHeight > el.grid.offsetHeight - 900) loadMore();
     });
-    window.addEventListener("resize", function () { clearPool(); measure(); render(); });
+    window.addEventListener("resize", function () {
+      clearPool(); measure(); render();
+      // 窗口变了 → 灯箱图片的显示矩形也变了，脏点框要按新尺寸重摆
+      if (el.lightbox.classList.contains("on")) layoutDirt();
+    });
 
     el.lbPrev.onclick = function () { lbStep(-1); };
     el.lbNext.onclick = function () { lbStep(1); };
@@ -1895,6 +2082,14 @@ html.is-phone #name-ok { min-height: 44px; }
         if (e.key === "1") { lbDecide(1); return; }
         if (e.key === "2") { lbDecide(2); return; }
         if (e.key === "0") { lbDecide(0); return; }
+        if (e.key === "h" || e.key === "H") {
+          // 灯箱里的问题框挡视线时按 H 隐藏/恢复；偏好记住（localStorage）
+          S.lbHideDirt = !S.lbHideDirt;
+          try { localStorage.setItem("mr_hidedirt", S.lbHideDirt ? "1" : "0"); } catch (e2) {}
+          layoutDirt();
+          toast(S.lbHideDirt ? "问题框已隐藏（按 H 恢复）" : "问题框已显示");
+          return;
+        }
         if (e.key === "+" || e.key === "=") { zoomBy(1.5); return; }
         if (e.key === "-" || e.key === "_") { zoomBy(1 / 1.5); return; }
         if (e.key === " ") {
@@ -1946,6 +2141,36 @@ html.is-phone #name-ok { min-height: 44px; }
         }).catch(function (e) { toast("读取目录信息失败: " + e.message); });
       });
     };
+    // 「本目录全部保留 / 不保留」：作用整个目录的本层（不含子目录），
+    // 与上面三个「本页…」按钮的可见范围语义彻底分开。点的时候现拉目录信息，
+    // 用真实文件数做确认弹窗，防止目录树没刷新导致误标。
+    function folderDecide(decision) {
+      guardName(function () {
+        api("/api/folder?folder=" + S.folderId).then(function (d) {
+          var n = (d.files != null) ? d.files : -1;
+          if (n === 0) { toast("本目录没有文件"); return; }
+          var label = decision === 1 ? "保留" : "不保留";
+          var tip = n > 0
+            ? "把本目录全部 " + n + " 个文件标为「" + label + "」？会覆盖已有标记，不可撤销。"
+            : "把本目录全部文件标为「" + label + "」？会覆盖已有标记，不可撤销。";
+          confirmDo(tip, function () {
+            api("/api/review/folder-decision", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ folderId: S.folderId, decision: decision }),
+            }).then(function (r) {
+              toast("已把 " + (r.changed || 0) + " 个文件标为「" + label + "」");
+              // 本层文件就地更新（父层文件服务端没动，别改）；目录树角标跟着刷新
+              S.items.forEach(function (f) { if (!f.fromParent) applyLocal(f.id, decision); });
+              updateStat();
+              refreshTreeSoon();
+            }).catch(function (e) { toast(e.message); });
+          });
+        }).catch(function (e) { toast("读取目录信息失败: " + e.message); });
+      });
+    }
+    if ($("btn-folder-keep")) $("btn-folder-keep").onclick = function () { folderDecide(1); };
+    if ($("btn-folder-reject")) $("btn-folder-reject").onclick = function () { folderDecide(2); };
     $("btn-root").onclick = openRootModal;
     $("btn-help").onclick = openHelp;
     if ($("btn-quality")) {
@@ -1990,7 +2215,7 @@ html.is-phone #name-ok { min-height: 44px; }
         S.claimedBy = releasing ? "" : S.user;   // 先乐观更新，界面立刻有反应
         updateClaimBtn();
         applyOwnerLocal(S.folderId, S.claimedBy);
-        toast(releasing ? "已释放认领" : "已认领，其他人将只能查看");
+        toast(releasing ? "已释放认领" : "已认领（只锁本目录直属的文件，子文件夹不受影响）");
         afterClaimChange();                      // 再跟服务端对齐一次，以服务端为准
       }).catch(function (e) {
         el.claimBtn.disabled = false;
@@ -2009,6 +2234,13 @@ html.is-phone #name-ok { min-height: 44px; }
     if (b4) b4.onclick = function () {
       if (!ensureToken()) return;
       location.href = U("/api/export?folder=" + S.folderId + "&recursive=1&t=" + encodeURIComponent(S.token));
+    };
+    // 问题清单 CSV：QC 检出问题的文件（损坏/重复/空镜/脏污/模糊/曝光/噪点），
+    // 含本目录及子目录。损坏的排最前（服务端已按此排序）。
+    var bqr = $("btn-qc-report");
+    if (bqr) bqr.onclick = function () {
+      if (!ensureToken()) return;
+      location.href = U("/api/qc-report?folder=" + S.folderId + "&recursive=1&t=" + encodeURIComponent(S.token));
     };
     var b5 = $("btn-copy");
     if (b5) b5.onclick = function () { openCopyModal(); };
@@ -2336,6 +2568,7 @@ html.is-phone #name-ok { min-height: 44px; }
       "<p><b>批量</b>：「本页全部保留 / 本页全部不保留 / 清除本页标记」只作用于<b>当前屏幕上看得见的</b>那几张；滚动加载进来但已经划出屏幕的不受影响。</p>" +
       "<p><b>清空本目录</b>：「清空本目录标记」作用于<b>这一个目录（不含子目录）</b>里的全部文件，保留 / 不保留 / 不确定都会被抹掉，<b>无法撤销</b>；确认弹窗里会写明本层有多少个已被标记、其中几个是别人标的。它和上面那个「清除本页标记」不是一回事 —— 后者只动屏幕上看得见的那几张。</p>" +
       "<p><b>含父目录</b>：默认打开 —— 进一个子目录时，会把<b>上一层目录直属的</b>照片也一起列出来（卡片左上角有绿色「父目录」角标），省得来回切。点工具栏那个按钮可以关掉，只看本目录。这只是<b>浏览范围</b>：标记、打包、导出的口径完全不变。</p>" +
+      "<p><b>问题框</b>：灯箱里 QC 检出「镜头脏污」时会在画面上画红框。嫌挡视线就按 <b>H</b> 隐藏，再按恢复 —— 偏好会被记住，卡片右上角的徽标不受影响。</p>" +
       "<p><b>下载口径</b>：打包 ZIP、导出路径清单、导出到本机目录、以及单文件下载，<b>都只给标记为「保留」的文件</b>。「不保留」和「没标过 / 不确定」的拿不到。</p>" +
       "<p><b>素材被覆盖过就要重标</b>：同一个位置换了文件（大小或修改时间变了），原来那条「保留」会自动作废，避免把没看过的内容打进交付包。</p>" +
       "<p><b>名字</b>：每次打开页面都要登记批注名，不能跳过；同一个页面里不能改名，想换名字刷新即可。名字只用于区分多人，服务关闭后失效。</p>" +
@@ -2346,6 +2579,7 @@ html.is-phone #name-ok { min-height: 44px; }
       "</div>";
     el.modal.classList.add("on");
   }
+
   function closeModal() { el.modal.classList.remove("on"); }
 
   function confirmDo(msg, fn) {
@@ -2367,9 +2601,7 @@ html.is-phone #name-ok { min-height: 44px; }
     el.modal.classList.add("on");
   }
 
-  
-
-// ---------- 状态与 SSE ----------
+  // ---------- 状态与 SSE ----------
   function loadStatus() {
     return api("/api/status").then(function (st) {
       S.canDownload = !!st.canDownload;
@@ -2433,6 +2665,31 @@ html.is-phone #name-ok { min-height: 44px; }
         // 下一次 reload / 返场 resync 也会从服务端重读对齐。
         if (String(d.data.folderId) === String(S.folderId)) clearLocalItems();
         refreshTreeSoon();
+      } else if (d.type === "folder-decision") {
+        // 别人（或另一个标签页）把整个目录标成了保留/不保留：本层文件就地应用同款标记，
+        // 父层文件服务端没动（folder-decision 只作用本层），不能跟着改。
+        if (String(d.data.folderId) === String(S.folderId)) {
+          S.items.forEach(function (f) { if (!f.fromParent) applyLocal(f.id, d.data.decision); });
+          updateStat();
+        }
+        refreshTreeSoon();
+      } else if (d.type === "qc") {
+        // 质量自动检测完成（服务端后台算完一张图就广播一次）。就地更新这张图的徽标，
+        // 灯箱正好开在它上面时同步重画脏点框。不改 decision，纯辅助提示。
+        var qf = d.data;
+        if (!qf || qf.fileId == null) return;
+        var it = S.byId[qf.fileId];
+        if (!it) return;
+        it.qc = qf.qc;
+        var card = el.grid.querySelector('.card[data-id="' + qf.fileId + '"]');
+        if (card) {
+          var thumb = card.querySelector(".thumb");
+          if (thumb) renderQCBadges(thumb, it);
+        }
+        if (S.lbIndex >= 0) {
+          var lf = lbList()[S.lbIndex];
+          if (lf && lf.id === qf.fileId) updateLbDirt(it);
+        }
       }
     };
     es.onerror = function () { /* 浏览器会自动重连 */ };

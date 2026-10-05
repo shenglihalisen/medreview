@@ -51,6 +51,11 @@ type VideoService struct {
 	probes map[string]probeInfo
 	jobs   map[string]*videoJob
 	warm   WarmupState
+
+	encMu     sync.Mutex
+	encChoice string // "cpu"/"n"=强制 libx264；"nvenc"/"qsv"/"amf"=只用那一个；"auto"/"y"/空=三个都试后择优
+	encMode   string // 已选中的编码器：""=libx264 软编；"nvenc"/"qsv"/"amf" 为硬件编码
+	encProbed bool
 }
 
 // transcodeProfile 是转码规格。它**参与缓存键**：改了分辨率/CRF/预设就等于换了产物，
@@ -61,8 +66,36 @@ type transcodeProfile struct {
 	preset    string // libx264 预设，越快文件越大
 }
 
-func (p transcodeProfile) tag() string {
-	return fmt.Sprintf("h%d-crf%d-%s", p.shortSide, p.crf, p.preset)
+// tag 是缓存键的一部分。**必须带上编码器**：从 libx264 换成 NVENC 时
+// 产物质量/码率分布都变了，老产物（老缓存）不能继续喂给浏览器。
+func (p transcodeProfile) tag(enc string) string {
+	return fmt.Sprintf("h%d-crf%d-%s-%s", p.shortSide, p.crf, p.preset, encTag(enc))
+}
+
+// encTag 把内部编码器代号翻成 tag 里用的短名（参与缓存键，别随意改）。
+func encTag(enc string) string {
+	switch enc {
+	case "nvenc":
+		return "nvenc"
+	case "qsv":
+		return "qsv"
+	case "amf":
+		return "amf"
+	}
+	return "cpu"
+}
+
+// encName 人话名，给日志用。
+func encName(enc string) string {
+	switch enc {
+	case "nvenc":
+		return "独显编码(NVENC)"
+	case "qsv":
+		return "核显编码(QSV)"
+	case "amf":
+		return "显卡编码(AMF)"
+	}
+	return "CPU 软编(libx264)"
 }
 
 func (p transcodeProfile) describe() string {
@@ -108,8 +141,9 @@ func (p transcodeProfile) targetSize(srcW, srcH int) (w, h int, need bool) {
 
 type probeInfo struct {
 	ok    bool
-	codec string // h264 / hevc / vp9 ...
-	w, h  int    // 源分辨率，用来算 720p 的目标尺寸
+	codec  string // h264 / hevc / vp9 ...
+	acodec string // 音频编码（空 = 无音轨）；h264+pcm 这类"能解但浏览器放不了"要靠它挡
+	w, h   int    // 源分辨率，用来算 720p 的目标尺寸
 	dur   float64
 	err   string
 }
@@ -191,10 +225,177 @@ func findTool(name string) string {
 // Available 报告能否转码（没装 ffmpeg 时前端会给出明确提示）。
 func (v *VideoService) Available() bool { return v.ffmpeg != "" && v.ffprobe != "" }
 
+// SetEncChoice 设置编码器选择，与 QC 的显卡开关同义（"-gpuqc n" 两个都不许用显卡）。
+func (v *VideoService) SetEncChoice(choice string) {
+	v.encMu.Lock()
+	v.encChoice = choice
+	v.encMu.Unlock()
+}
+
+// encCached 当前选用的编码器（还没探测时返回空）。它参与缓存键，见 transcodeProfile.tag。
+func (v *VideoService) encCached() string {
+	v.encMu.Lock()
+	defer v.encMu.Unlock()
+	return v.encMode
+}
+
+// encoderArgs 按当前编码器给输出侧参数（含 -c:v）。
+// 硬件编码器那几条参数都是"画质档位"语义，不是软编的 crf 直译：
+//   - NVENC：rc=vbr_hq（-b 恒定码率会明显糊）+ cq 当质量档（同 crf）+ preset p4 折中速度/体积；
+//   - QSV：global_quality 当质量档，look_ahead 0（默认开会把延迟堆到秒级，批量预热没意义）；
+//   - AMF：quality/usage 默认值可用，别乱调。
+func (v *VideoService) encoderArgs() (string, []string) {
+	switch v.encMode {
+	case "nvenc":
+		return "h264_nvenc", []string{"-rc", "vbr_hq", "-cq", strconv.Itoa(v.profile.crf), "-preset", "p4"}
+	case "qsv":
+		return "h264_qsv", []string{"-preset", "medium", "-look_ahead", "0", "-global_quality", strconv.Itoa(v.profile.crf)}
+	case "amf":
+		return "h264_amf", []string{"-quality", "balanced", "-usage", "transcoding"}
+	}
+	return "libx264", []string{"-preset", v.profile.preset, "-crf", strconv.Itoa(v.profile.crf)}
+}
+
+// ensureEncoder 选编码器：libx264 当基线，硬件编码器**真跑一段**再比时间。
+//
+// 三条硬规矩（都是踩出来的）：
+//  1. 只认"真编得出文件"的 —— 看 -encoders 列表说有不算。本机 NVDEC 就是
+//     "capabilities 有、一跑就静默回退软解"的坑，编码器同理，必须实跑；
+//  2. 必须比 libx264 快 encPreferRatio 以上才换 —— 换编码器是有画质代价的
+//     （硬件编码器同等码率下细节更少），别为了 5% 的提速翻脸；
+//  3. 试跑要和真实负载长得一样（同为 720p、同样带缩放），否则测的是另一件事。
+func (v *VideoService) ensureEncoder(ctx context.Context, src string) string {
+	v.encMu.Lock()
+	if v.encProbed {
+		mode := v.encMode
+		v.encMu.Unlock()
+		return mode
+	}
+	v.encMu.Unlock()
+
+	best := ""
+	bestSec := 0.0
+	cpuSec := 0.0
+	cands := encCandidates(v.encChoice)
+	if v.ffmpeg != "" && len(cands) > 0 && src != "" {
+		if sec, ok := v.encodeTrial(ctx, src, ""); ok {
+			best, bestSec, cpuSec = "", sec, sec
+		}
+		for _, c := range cands {
+			sec, ok := v.encodeTrial(ctx, src, c.codec)
+			if !ok || best == "" {
+				continue
+			}
+			if sec < bestSec*encPreferRatio {
+				best, bestSec = c.mode, sec
+			}
+		}
+	}
+	switch {
+	case best != "":
+		log.Printf("视频转码: 编码器择优 → %s（试编 3 秒 %.1fs，比 libx264 的 %.1fs 快）", encName(best), bestSec, cpuSec)
+	case cpuSec > 0 && len(cands) == 1:
+		// 用户点名了某个编码器，但它没快过门槛 —— 说清是"退回"，别让人以为点错了没用。
+		log.Printf("视频转码: 你指定的 %s 试编 %.1fs，比 libx264 %.1fs 慢（没快过 %d%% 门槛）→ 退回 %s",
+			encName(cands[0].mode), bestSec, cpuSec, int((1-encPreferRatio)*100), encName(""))
+	case cpuSec > 0:
+		log.Printf("视频转码: 硬件编码器试编都不够快（最快 %.1fs vs libx264 %.1fs）→ 用 %s",
+			bestSec, cpuSec, encName(""))
+	default:
+		if len(cands) == 0 {
+			log.Printf("视频转码: 按你的选择不用硬件编码器 → %s", encName(""))
+		} else {
+			log.Printf("视频转码: 硬件编码器试编失败 → 用 %s", encName(""))
+		}
+	}
+	v.encMu.Lock()
+	v.encMode, v.encProbed = best, true
+	v.encMu.Unlock()
+	return best
+}
+
+// encPreferRatio 硬件编码器要快过 libx264 多少倍倍数才值得换（0.8 = 要快 20%+）。
+const encPreferRatio = 0.8
+
+// encCandidate 一个硬件编码器：mode 是内部简称，codec 是 ffmpeg 的 -c:v 取值。
+type encCandidate struct{ mode, codec string }
+
+// encCandidates 按用户的选择返回"这次要试哪几个硬件编码器"。
+//
+//	"cpu"/"n"           → 空切片 = 强制 libx264，一个都不试
+//	"nvenc/qsv/amf"     → 只试点名的这些（逗号分隔可多点，如 "nvenc,qsv"）
+//	"auto"/"y"/空      → 三个都试，交给 ensureEncoder 比速度
+//
+// 2026-10-04 起拆细：以前只有 y/n 两档，想指定用哪张卡只能自己改代码。
+func encCandidates(choice string) []encCandidate {
+	all := []encCandidate{{"nvenc", "h264_nvenc"}, {"qsv", "h264_qsv"}, {"amf", "h264_amf"}}
+	s := strings.ToLower(strings.TrimSpace(choice))
+	switch s {
+	case "n", "no", "cpu":
+		return nil
+	case "", "y", "yes", "auto":
+		return all
+	}
+	want := map[string]bool{}
+	for _, p := range strings.Split(s, ",") {
+		switch strings.TrimSpace(p) {
+		case "nvenc", "cuda":
+			want["nvenc"] = true
+		case "qsv":
+			want["qsv"] = true
+		case "amf":
+			want["amf"] = true
+		}
+	}
+	var out []encCandidate
+	for _, c := range all { // 按固定顺序输出，日志/缓存键才稳定
+		if want[c.mode] {
+			out = append(out, c)
+		}
+	}
+	if len(out) == 0 {
+		return all // 一个都没认出来 = 老行为，自己择优
+	}
+	return out
+}
+
+// encodeTrial 拿 src 的前 3 秒按 720p 试编一次，返回耗时（失败返回 false）。
+// 产物丢到 vtrans 下的临时名（前缀点号，PrepareCache 不会当成品清理时误伤）。
+func (v *VideoService) encodeTrial(ctx context.Context, src, codec string) (float64, bool) {
+	tmp := filepath.Join(v.dir, "vtrans", ".encprobe.mp4")
+	os.Remove(tmp)
+	vc, extra := "", []string{}
+	if codec != "" {
+		vc = codec
+	} else {
+		vc, extra = v.encoderArgs()
+	}
+	args := []string{"-hide_banner", "-y", "-v", "error", "-i", src, "-t", "3"}
+	if v.profile.shortSide > 0 {
+		args = append(args, "-vf", fmt.Sprintf("scale=-2:%d", v.profile.shortSide))
+	}
+	args = append(args, "-c:v", vc)
+	args = append(args, extra...)
+	args = append(args,
+		"-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "64k",
+		"-progress", "pipe:1", "-nostats", "-f", "mp4", tmp)
+	t0 := time.Now()
+	if err := exec.CommandContext(ctx, v.ffmpeg, args...).Run(); err != nil {
+		os.Remove(tmp)
+		return 0, false
+	}
+	if st, err := os.Stat(tmp); err != nil || st.Size() <= 0 {
+		os.Remove(tmp)
+		return 0, false
+	}
+	os.Remove(tmp)
+	return time.Since(t0).Seconds(), true
+}
+
 // key 用 "相对路径 + 大小 + 修改时间 + 转码规格" 做缓存键。和缩略图同理：
 // 只按 id 缓存会在换素材目录后张冠李戴；不带规格则改了 -vres 还会命中老产物。
 func (v *VideoService) key(f *FileItem) string {
-	sum := sha1.Sum([]byte(fmt.Sprintf("%s|%d|%d|%s", f.RelPath, f.Size, f.MTime, v.profile.tag())))
+	sum := sha1.Sum([]byte(fmt.Sprintf("%s|%d|%d|%s", f.RelPath, f.Size, f.MTime, v.profile.tag(v.encCached()))))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -220,7 +421,7 @@ func (v *VideoService) profileFile() string {
 // keep=true（-vkeep）：产物留着复用，只清 .part 残渣；
 // 无论 keep 是什么，转码规格变了（-vres 改过）就一定清，因为老产物已经作废。
 func (v *VideoService) PrepareCache(keep bool) error {
-	tag := v.profile.tag()
+	tag := v.profile.tag(v.encCached())
 	f := v.profileFile()
 
 	old := ""
@@ -229,7 +430,20 @@ func (v *VideoService) PrepareCache(keep bool) error {
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	specChanged := old != tag
+	// ⚠️ 编码器也要参与"规格变了没有"的判断，而且不能塞进 tag：
+	// tag 是产物缓存键，在第一次探测之前算出来是空（cpu），之后才可能变成 qsv/nvenc；
+	// 一旦让它进 tag，同一次会话里前后算出来的 key 会不一致（产物名跳来跳去）。
+	// 所以规格文件里额外记一行 enc=，换了编码器就把老产物当废货清掉。
+	encNow := encTag(v.encCached())
+	oldEnc := ""
+	if i := strings.Index(old, "\nenc="); i >= 0 {
+		oldEnc = strings.TrimSpace(strings.TrimPrefix(old[i+len("\nenc="):], ""))
+		old = old[:i]
+	}
+	if oldEnc == "" {
+		oldEnc = encTag("") // 老格式（只有一行 tag）就当一直是软编
+	}
+	specChanged := old != tag || oldEnc != encNow
 	dropProducts := !keep || specChanged
 
 	d := filepath.Join(v.dir, "vtrans")
@@ -293,7 +507,12 @@ func (v *VideoService) PrepareCache(keep bool) error {
 	}
 
 	if specChanged {
-		log.Printf("转码规格已变（%s → %s），旧产物全部作废", old, tag)
+		switch {
+		case old != tag:
+			log.Printf("转码规格已变（%s → %s），旧产物全部作废", old, tag)
+		default:
+			log.Printf("编码器已变（%s → %s），旧产物全部作废", oldEnc, encNow)
+		}
 	}
 	switch {
 	case products > 0:
@@ -313,7 +532,8 @@ func (v *VideoService) PrepareCache(keep bool) error {
 	v.jobs = map[string]*videoJob{}
 	v.mu.Unlock()
 
-	return os.WriteFile(f, []byte(tag+"\n"), 0o644)
+	// 规格文件记两行：产物规格 tag + 编码器（后者换编码器时用来作废老产物）
+	return os.WriteFile(f, []byte(tag+"\nenc="+encNow+"\n"), 0o644)
 }
 
 // Purge 清空转码产物（换素材目录、或转码规格变了时调用）。
@@ -365,7 +585,13 @@ func (v *VideoService) probe(f *FileItem) probeInfo {
 	out, err := cmd.Output()
 	if err != nil {
 		pi.err = "无法识别视频编码（ffprobe 探测失败）"
-		log.Printf("ffprobe 失败 (%s): %v", f.Name, err)
+		// exit status 1 同样没信息量，把 ffprobe 自己说的话带上
+		// （比如 "moov atom not found" 一眼就知道是文件不完整）
+		if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
+			log.Printf("ffprobe 失败 (%s): %v | %s", f.Name, err, errorLine(string(ee.Stderr)))
+		} else {
+			log.Printf("ffprobe 失败 (%s): %v", f.Name, err)
+		}
 		return pi
 	}
 	var po struct {
@@ -384,10 +610,17 @@ func (v *VideoService) probe(f *FileItem) probeInfo {
 		return pi
 	}
 	for _, s := range po.Streams {
-		if s.CodecType == "video" {
+		switch s.CodecType {
+		case "video":
 			pi.codec = strings.ToLower(s.CodecName)
 			pi.w, pi.h = s.Width, s.Height
-			break
+		case "audio":
+			// ⚠️ 音频编码必须一起记：常见摄像机（索尼/松下）录的是 h264 + pcm_s16le，
+			// 只看视频编码会把它判成"浏览器可直接播"，结果点开有画面没声音或直接播不出。
+			// 浏览器在 MP4/MOV 里只认 aac/mp3（opus 仅 WebM 稳），pcm 一律不支持。
+			if pi.acodec == "" {
+				pi.acodec = strings.ToLower(s.CodecName)
+			}
 		}
 	}
 	if pi.codec == "" {
@@ -405,9 +638,16 @@ func (v *VideoService) probe(f *FileItem) probeInfo {
 }
 
 // isBrowserPlayable 判断编码能不能在浏览器里直接播。
-func isBrowserPlayable(codec string) bool {
+// **视频和音频都要过** —— 只查视频编码会把 h264+pcm_s16le 的摄像机 MOV 判成可直接播，
+// 浏览器实际放不了（MP4/MOV 不支持 pcm）。转码产物统一是 h264+aac，以此为底线。
+func isBrowserPlayable(codec, acodec string) bool {
 	switch codec {
 	case "h264", "avc1", "vp8", "vp9", "av1", "theora":
+	default:
+		return false
+	}
+	switch acodec {
+	case "", "aac", "mp3", "opus": // "" = 该片本来就没音轨
 		return true
 	}
 	return false
@@ -422,7 +662,7 @@ func (v *VideoService) Status(f *FileItem) vstatus {
 	if !pi.ok {
 		return vstatus{State: "error", Msg: pi.err}
 	}
-	if isBrowserPlayable(pi.codec) {
+	if isBrowserPlayable(pi.codec, pi.acodec) {
 		return vstatus{State: "ready", Pct: 100, Codec: pi.codec, Source: "original"}
 	}
 	out := v.outPath(f)
@@ -584,6 +824,11 @@ func (v *VideoService) WarmUp(ctx context.Context, conc int) {
 	// 上一轮可能被取消（换素材目录），留下"排队中"的僵尸任务会让前端一直显示
 	// "转码中 0%"，所以开新轮之前先清掉没跑起来的那些。
 	v.releaseQueued()
+	// 选编码器（NVENC/QSV/AMF 还是 libx264）：拿第一个视频试编 3 秒比时间。
+	// 放在这里而不是启动时 —— 启动时还没扫目录，(src) 可能连一个视频都没有。
+	if files0, err := v.store.AllVideos(); err == nil && len(files0) > 0 {
+		v.ensureEncoder(ctx, v.store.absPath(files0[0].RelPath))
+	}
 
 	files, err := v.store.AllVideos()
 	if err != nil {
@@ -646,7 +891,7 @@ func (v *VideoService) WarmUp(ctx context.Context, conc int) {
 				qmu.Lock()
 				broken++
 				qmu.Unlock()
-			case isBrowserPlayable(pi.codec):
+			case isBrowserPlayable(pi.codec, pi.acodec):
 				// 编码本来就浏览器可播 —— 这就是"不一定都要转码"，直接跳过
 				v.setJob(&f, "done", 100, "")
 				qmu.Lock()
@@ -779,7 +1024,9 @@ func (v *VideoService) transcode(ctx context.Context, f *FileItem, pi probeInfo,
 		dims += "(原分辨率)"
 	}
 
-	// veryfast + crf26 兼顾速度与体积；+faststart 让 moov 前置，浏览器才能边下边播。
+	// 编码器按实测择优（NVENC/QSV/AMF 或 libx264），画质档位跟着 encoderArgs 走；
+	// +faststart 让 moov 前置，浏览器才能边下边播。
+	vcodec, encExtra := v.encoderArgs()
 	args := []string{
 		"-hide_banner", "-y",
 		"-i", src,
@@ -787,8 +1034,9 @@ func (v *VideoService) transcode(ctx context.Context, f *FileItem, pi probeInfo,
 	if needScale {
 		args = append(args, "-vf", fmt.Sprintf("scale=%d:%d", tw, th))
 	}
+	args = append(args, "-c:v", vcodec)
+	args = append(args, encExtra...) // 编码器专属参数（不能塞进字面量里，Go 不允许那段展开）
 	args = append(args,
-		"-c:v", "libx264", "-preset", v.profile.preset, "-crf", strconv.Itoa(v.profile.crf),
 		"-pix_fmt", "yuv420p",
 		"-c:a", "aac", "-b:a", "128k",
 		"-movflags", "+faststart",
@@ -837,7 +1085,10 @@ func (v *VideoService) transcode(ctx context.Context, f *FileItem, pi probeInfo,
 		v.mu.Unlock()
 	}
 	if err := cmd.Wait(); err != nil {
-		return "", fmt.Errorf("ffmpeg 转码失败: %s", tailLine(stderr.String()))
+		// 把 ffmpeg 的真正原因也落日志：只记 "Conversion failed!" 这种没信息量的
+		// 尾行，事后根本没法定位，只能手动重跑一遍 ffmpeg（实测踩过两次）。
+		log.Printf("视频转码失败 [%s]: %s", f.Name, errorLine(stderr.String()))
+		return "", fmt.Errorf("ffmpeg 转码失败: %s", errorLine(stderr.String()))
 	}
 	if err := os.Rename(tmp, out); err != nil {
 		return "", err
@@ -856,6 +1107,34 @@ func tailLine(s string) string {
 		last = last[:200]
 	}
 	return last
+}
+
+// errorLine 从 ffmpeg 的一大段输出里挑出真正说明问题的那一行。
+// ffmpeg 习惯把 "Conversion failed!" 这种没信息量的话放在最后，
+// 真正的原因在前面几行（Invalid NAL unit size / moov atom not found /
+// Decode error rate ... exceeds maximum），所以按关键词倒着找第一条。
+func errorLine(s string) string {
+	keys := []string{
+		"error rate", "Decode error", "Invalid data", "Invalid NAL", "moov atom not found",
+		"No space", "Disk full", "Permission denied", "No such file",
+		"Invalid argument", "Error", "error",
+	}
+	lines := strings.Split(s, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		l := strings.TrimSpace(lines[i])
+		if l == "" || l == "Conversion failed!" {
+			continue
+		}
+		for _, k := range keys {
+			if strings.Contains(l, k) {
+				if len(l) > 240 {
+					l = l[:240]
+				}
+				return l
+			}
+		}
+	}
+	return tailLine(s)
 }
 
 // handleVTransWarmup 给页面/排查用：预热进度（还在不在转、总共几个、转好几个）。

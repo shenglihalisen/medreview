@@ -9,11 +9,13 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -21,20 +23,64 @@ import (
 //go:embed all:web
 var webEmbed embed.FS
 
+// checkAddr 检查监听地址能不能用：必须是 host:port，且端口是 1~65535 的数字。
+// 目的不是做安全过滤，而是把 `lookup tcp/=: unknown port` 这种 Go 原始报错
+// 提前换成一句人话（启动脚本拼错参数时真的会发生）。
+func checkAddr(addr string) error {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("格式要写成 :端口 或 IP:端口，例如 :8080")
+	}
+	if strings.TrimSpace(host) != host {
+		return fmt.Errorf("地址前后多了空格")
+	}
+	// 0 是合法的：**让系统挑一个空闲端口**（app.go 里靠它拿真实端口），别把它挡了。
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 0 || n > 65535 {
+		return fmt.Errorf("端口 %q 不是 0~65535 的数字（0 = 让系统挑一个空闲端口）", port)
+	}
+	return nil
+}
+
 func main() {
 	root := flag.String("root", "", "素材根目录；留空则从上次记录读取，或在网页里选择")
 	addr := flag.String("addr", ":8080", "监听地址，例如 :8080 或 0.0.0.0:8080")
-	dbPath := flag.String("db", "medreview.db", "审阅状态数据库路径")
+	dbPath := flag.String("db", "medreview.db", "审阅状态数据库路径；默认每次启动自动清空（退出即全清），想跨次保留得显式指定同一个文件")
+	csvPath := flag.String("csv", "", "退出时把审阅标记导出成 CSV 的路径；留空 = 与数据库同目录的 <库名>-review.csv（每轮覆盖同一份）")
 	cacheDir := flag.String("cache", "cache", "转码缓存目录")
 	token := flag.String("token", "", "下载页口令；留空则每次启动随机生成")
 	openDL := flag.Bool("open-dl", false, "关闭下载权限校验（任何页面都能打包下载）")
-	vjobs := flag.Int("vjobs", 2, "视频预转码并发数，即预热时同时转几个视频")
+	vjobs := flag.Int("vjobs", 3, "视频预转码并发数，即预热时同时转几个视频")
+	encFlag := flag.String("enc", "", "视频转码编码：cpu=libx264 软编（默认）；nvenc/qsv/amf=只用指定的这些（逗号分隔，如 nvenc,qsv）；auto=都比速度，快 20%+ 才换")
+	qcFlag := flag.String("qcdec", "", "视频 QC 解码：cpu=软解（默认）；cuda/qsv/d3d11va=只用指定的这些（逗号分隔）；auto=探测后择优")
+	gpuqc := flag.String("gpuqc", "", "【已拆细，新脚本请用 -enc / -qcdec】兼容开关：y=两处都让程序择优用显卡；n=两处都软解")
 	vres := flag.Int("vres", 720, "转码分辨率：720p（把较小的一边封顶到 720，另一边等比）；0 = 保持原分辨率")
 	ires := flag.Int("ires", 1600, "图片预览分辨率：把较小的一边封顶到这个值（点开时现转+缓存，原图在灯箱里用「看原图」看）；0 = 一律原图")
 	vkeep := flag.Bool("vkeep", false, "保留上次启动留下的转码产物。默认每次启动都清掉上一轮的产物（避免残留占地方）；加了这个开关才会复用，代价是可能用到老产物")
 	autoOpen := flag.Bool("open", false, "启动后自动打开审阅页（想开下载页就从审阅页切，或手动加 -addr 后缀）")
+	autoClose := flag.Bool("autoclose", false, "QC 全部完成后自动退出（硬件测试脚本用，配合 -gpuqc 对比耗时）")
 	logFile := flag.String("log", "", "日志文件路径；留空自动挑：当前目录 → 程序所在目录 → 临时目录")
+	gpuInfo := flag.Bool("gpuinfo", false, "只探测并打印本机显卡（独显/核显）然后退出；start.bat 用它来决定问哪几个问题")
 	flag.Parse()
+
+	// ---------- 命令行里可能带的手工引号，统一在这里收口 ----------
+	// 粘贴路径十有八九会把 "D:\我的 素材" 整段带引号粘进来。
+	// 以前是靠 start.bat 里 `set "X=!X:"=!"` 去引号的，那招有两个问题：
+	//   1. **留空时会变成 "="**（实测：变量为空 → 结果是 `"=` 两个字），
+	//      于是"启动后在网页里选目录"这条正路被堵死；
+	//   2. 只对 bat 那条路生效，拖图标进来的参数、别的调用方各写各的。
+	// 现在统一在程序侧 trim，一处管全部入口。
+	*root = strings.Trim(strings.TrimSpace(*root), `"`)
+	*token = strings.Trim(strings.TrimSpace(*token), `"`)
+	*addr = strings.Trim(strings.TrimSpace(*addr), `"`)
+
+	// ---------- -gpuinfo：只列显卡就退出 ----------
+	// 必须排在建日志和 wipeDB **之前**：这是一个纯查询，不能碰数据库、
+	// 更不能把上次那个库删了（bat 启动时第一件事就是调它）。
+	if *gpuInfo {
+		printGPUInfo()
+		return
+	}
 
 	// ---------- 拖文件夹到图标上启动 ----------
 	// Windows 把被拖的那个文件夹路径作为命令行参数传进来（可能带引号），
@@ -55,6 +101,63 @@ func main() {
 	logRing500 := NewLogRing(500)
 	logFilePath = setupLogging(*logFile, logRing500)
 
+	// ---------- 监听地址校验 ----------
+	// 启动脚本万一拼错参数，会把乱七八糟的东西塞进 -addr（实测见过 ":="），
+	// 结果是一句 Go 的原始报错 `lookup tcp/=: unknown port`，根本看不懂。
+	// 这里先查一遍，给人话。
+	if err := checkAddr(*addr); err != nil {
+		fatalf("监听地址不对：%s（%v）\n  端口填 1~65535 的数字就行，例如 8080；直接回车用默认的 8080。", *addr, err)
+	}
+
+	// ---------- 素材根目录有效性校验 ----------
+	// -root 参数 / 拖入的路径可能因为启动脚本的参数拼接出错而变成一串非法字符
+	// （实测：start.bat 引号错位时传进来过 `D:" -token 1123 -addr :=`）。
+	// 以前是照单全收 → 扫描失败、页面上显示一串乱码路径，看着像程序坏了。
+	// 现在：无效就忽略掉，启动后让用户在网页里重新选目录，服务照常可用。
+	if *root != "" {
+		if st, serr := os.Stat(*root); serr != nil || !st.IsDir() {
+			log.Printf("警告：素材根目录无效，已忽略 —— %s", *root)
+			log.Printf("      启动后请在审阅页里重新选择素材目录。")
+			*root = ""
+		}
+	}
+
+	// ---------- 启动兜底清库 ----------
+	// 上轮被硬杀（叉掉黑窗口 / taskkill）时来不及清，库里留着一地残渣，
+	// 下次打开还是上一轮的老界面（root_path 被复用、素材/标记/QC 全在）。
+	// 所以开库前先清一遍；用完这次的库由 Close() 再清一次，双保险。
+	//
+	// ⚠️ 但**只有在确认没别的活实例在跑**时才敢删：端口一被占就说明有实例正用这个库，
+	//    这时候删等于把人家那轮审阅弄丢 —— 而且 Windows 上对方还会照常往已删的文件里写，
+	//    表面看不出异常，记录直接读不回来了。所以先探一下端口：
+	//    探不动 → 库原样留着（下面 bind() 会给「端口已被占用」的人话提示并退出）；
+	//    探得动 → 没人在用 → 此刻 openDB 还没跑，删得干干净净。
+	if ln, verr := net.Listen("tcp", *addr); verr != nil {
+		log.Printf("端口被占用（%s），跳过本次清库 —— 不碰上一个实例的数据库", *addr)
+	} else {
+		_ = ln.Close()
+		wipeDB(*dbPath)
+	}
+
+	// ---------- 硬件选择：优先级 显式 -enc/-qcdec > 兼容 -gpuqc > 默认软解 ----------
+	//
+	// 2026-10-04 拆细：转码编码与 QC 解码分开选（bat 问四个问题）。
+	// 默认两处都是 cpu（软解）—— 用户定的「默认有软解，显卡要主动开」。
+	// -gpuqc 是老开关（qc-bench.bat 还在用）：y=两处 auto，n=两处 cpu。
+	encHW, qcHW := "cpu", "cpu"
+	switch strings.ToLower(strings.TrimSpace(*gpuqc)) {
+	case "y", "yes", "1":
+		encHW, qcHW = "auto", "auto"
+	}
+	if s := strings.TrimSpace(*encFlag); s != "" {
+		encHW = s
+	}
+	if s := strings.TrimSpace(*qcFlag); s != "" {
+		qcHW = s
+	}
+	log.Printf("硬件选择：视频转码编码=%s / 视频 QC 解码=%s   （cpu=软解；具体卡名=只用那一张；auto=程序实测后择优）",
+		encHW, qcHW)
+
 	sub, err := fs.Sub(webEmbed, "web")
 	if err != nil {
 		fatalf("内嵌资源异常: %v", err)
@@ -62,18 +165,22 @@ func main() {
 	webFS = sub
 
 	cfg := appConfig{
-		root:     *root,
-		addr:     *addr,
-		dbPath:   *dbPath,
-		cacheDir: *cacheDir,
-		token:    *token,
-		openDL:   *openDL,
-		vjobs:    *vjobs,
-		vres:     *vres,
-		ires:     *ires,
-		vkeep:    *vkeep,
-		autoOpen: *autoOpen,
-		logFile:  *logFile,
+		root:      *root,
+		addr:      *addr,
+		dbPath:    *dbPath,
+		cacheDir:  *cacheDir,
+		token:     *token,
+		openDL:    *openDL,
+		vjobs:     *vjobs,
+		qcHW:      qcHW,
+		encHW:     encHW,
+		vres:      *vres,
+		ires:      *ires,
+		vkeep:     *vkeep,
+		autoOpen:  *autoOpen,
+		autoClose: *autoClose,
+		logFile:   *logFile,
+		csvPath:   *csvPath,
 	}
 
 	a, err := newApp(cfg, logRing500, logFilePath)
@@ -109,7 +216,7 @@ func main() {
 	signal.Notify(sigCh, os.Interrupt)
 	go func() {
 		if _, ok := <-sigCh; ok {
-			log.Println("收到 Ctrl+C，正在停止服务并清理临时缓存...")
+			log.Println("收到 Ctrl+C，正在停止服务并清理临时缓存与数据库...")
 			a.Close()
 			os.Exit(0)
 		}

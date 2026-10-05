@@ -67,6 +67,15 @@ html, body {
 .tree-row.active { background: var(--primary-soft); color: var(--primary); }
 .tree-row .tw { width: 16px; text-align: center; color: var(--text-faint); flex-shrink: 0; font-size: 11px; }
 .tree-row .tn { overflow: hidden; text-overflow: ellipsis; flex: 1; }
+/* 虚拟节点「（直属文件）」：不是真目录，弱化显示（斜体+浅色），和真实目录区分开 */
+.tree-row.tree-virtual .tn { font-style: italic; color: var(--text-faint); }
+.tree-row.tree-virtual:hover { background: #f6f7f9; }
+/* 灯箱里的 QC 徽标条：独立一行插在 .lb-top 与 .lb-body 之间（不能塞进 .lb-top，
+   那是横排 flex 会挤坏布局）。黑底上徽标用原浅色底 + 深字，对比足够。
+   用户反馈还嫌小（2026-10-01）：字号 14→17、加厚内边距。 */
+#lb-qc { display: flex; gap: 10px; padding: 8px 16px 4px; flex-wrap: wrap; }
+#lb-qc .qc-lb { font-size: 17px; font-weight: 700; padding: 4px 14px; border-radius: 6px; color: #1a1a1a; }
+#lb-qc .qc-lb.qc-dirt, #lb-qc .qc-lb.qc-noise { color: #fff !important; }
 .tree-row .tc {
   font-size: 11px;
   color: var(--text-faint);
@@ -214,6 +223,23 @@ select, input[type=text] {
   position: absolute; left: 4px; top: 4px; background: rgba(24,110,60,.85); color: #fff;
   font-size: 10px; padding: 1px 5px; border-radius: 4px;
 }
+/* 质量自动检测（QC）徽标：右上角竖排小角标，纯辅助提示，不参与人工 decision。
+   颜色区分四类：重复/损坏/空镜为警示黄橙，镜头脏污为红。 */
+.qc-stack {
+  position: absolute; right: 4px; top: 4px; z-index: 3;
+  display: none; flex-direction: column; align-items: flex-end; gap: 2px;
+}
+/* 用户反馈徽标太小看不清（2026-10-01）：字号 10→13、内边距加厚 */
+.qc-stack span { color: #1a1a1a; font-size: 13px; padding: 2px 8px; border-radius: 5px; font-weight: 700; }
+.qc-dup { background: #ffd54a; }
+.qc-corrupt { background: #ff9d3a; }
+.qc-blank { background: #ffe08a; }
+.qc-dirt { background: #ff5a5a; color: #fff !important; }
+/* 后加的三个：模糊=紫、曝光=青（区分欠曝/过曝见徽标文字）、噪点=灰紫 */
+.qc-blur { background: #b98cff; }
+.qc-exposure { background: #4fd1e0; }
+.qc-noise { background: #9aa0b5; color: #fff !important; }
+.qc-shake { background: #7fe3a8; }
 #empty { padding: 60px 0; text-align: center; color: var(--text-faint); }
 
 /* ---------- 灯箱 ---------- */
@@ -226,7 +252,10 @@ select, input[type=text] {
 .lb-top .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 .lb-top button { background: rgba(255,255,255,.12); border: 0; color: #fff; border-radius: 6px; padding: 5px 12px; cursor: pointer; font: inherit; font-size: 13px; }
 .lb-top button:hover { background: rgba(255,255,255,.22); }
-.lb-body { flex: 1; display: flex; align-items: center; justify-content: center; overflow: hidden; padding: 0 96px; }
+/* position:relative 是给脏点覆盖层用的：覆盖层 absolute 铺满本层，
+   且 img.offsetLeft/Top 也是相对本层量的（layoutDirt 依赖这点）。
+   .lb-side 是 #lightbox 的直接子元素、不是本层的子元素，所以不受影响。 */
+.lb-body { flex: 1; display: flex; align-items: center; justify-content: center; overflow: hidden; padding: 0 96px; position: relative; }
 .lb-body img {
   max-width: 100%; max-height: 100%; object-fit: contain;
   transform-origin: center center; will-change: transform;
@@ -237,6 +266,18 @@ select, input[type=text] {
 .lb-body video {
   max-width: 100%; max-height: 100%; background: #000;
   transform-origin: center center; touch-action: none; will-change: transform;
+}
+/* 镜头脏污覆盖层：铺满 .lb-body 的兄弟层，位置由 JS 按图片实际显示矩形算（layoutDirt），
+   缩放/平移时由 JS 复制图片的 transform（syncDirtTransform）。
+   ⚠️ 不把 img 包进这个层里 —— 那样 img 的百分比 max-height 会失效（见 lbMedia 注释）。 */
+.lb-dirt-layer {
+  position: absolute; inset: 0; pointer-events: none; z-index: 1;
+  transform-origin: center center; will-change: transform;
+}
+/* 镜头脏污框：半透明红色描边 */
+.lb-dirt {
+  position: absolute; box-sizing: border-box;
+  border: 2px solid rgba(255,70,70,.95); background: rgba(255,40,40,.18);
 }
 /* 左右两列操作按钮：左边标记、右边缩放。居中垂直排列。 */
 .lb-side {

@@ -135,12 +135,17 @@ def main():
         check('生成失败会 fatalf 退出', 'fatalf("无法生成随机下载口令' in main_go)
         check('口令是 12 字节熵（24 个 hex 字符）', 'make([]byte, 12)' in main_go)
         bat = os.path.join(D, 'start.bat')
+        # 2026-09-25：start.bat 恢复使用且支持用户输入口令 ——
+        # 禁止的是「写死具体口令」：这里只比对前缀，避免把历史口令原文写进公开仓库。
+        # ⚠️ 这一行必须定义在 if 之外：下面 README 那条断言（不管 bat 在不在）都要用它，
+        # 缩进成 0 还会打断外层的 if / try 块，直接把整个脚本变成语法错误。
+        OLD_FIXED_TOKEN_PREFIX = 'b8cd6dd26'
         if os.path.exists(bat):
             bat_txt = open(bat, encoding='gbk', errors='replace').read()
-            # 2026-09-25：start.bat 恢复使用且支持用户输入口令 ——
-            # 禁止的是「写死具体口令」：这里只比对前缀，避免把历史口令原文写进公开仓库。
-OLD_FIXED_TOKEN_PREFIX = 'b8cd6dd26'
-            tok_lines = [l for l in bat_txt.splitlines() if '-token' in l]
+            # 只看真正会被执行的行：rem 注释里提到 -token 不算
+            # （比如记录"参数被拼乱"这类历史 bug 的注释就会写到 -token）
+            tok_lines = [l for l in bat_txt.splitlines()
+                         if '-token' in l and not l.lstrip().lower().startswith('rem')]
             ok = all(('!TOKEN!' in l or '-token <你的口令>' in l) for l in tok_lines) and OLD_FIXED_TOKEN_PREFIX not in bat_txt
             check('start.bat 不写死口令（只用 !TOKEN! 变量）', ok,
                   str(tok_lines))

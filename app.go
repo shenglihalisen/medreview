@@ -22,18 +22,22 @@ import (
 // gui / console 两种构建共用同一套启动流程，差别只在最后一步：
 // console 版阻塞在 srv.Serve 上，gui 版把 HTTP 服务丢到后台、主线程交给本地窗口。
 type appConfig struct {
-	root     string // 素材根目录（命令行 -root，或拖到图标上的那个文件夹）
-	addr     string // 监听地址，例如 :8080
-	dbPath   string // 审阅状态数据库
-	cacheDir string // 转码缓存目录
-	token    string // 下载口令，空 = 随机生成
-	openDL   bool   // 关闭下载口令校验
-	vjobs    int    // 视频预热并发数
-	vres     int    // 视频转码规格（较小边封顶）
-	ires     int    // 图片预览规格（较小边封顶）
-	vkeep    bool   // 保留上一轮的转码产物
-	autoOpen bool   // 启动后自动打开下载页
-	logFile  string // 日志文件路径
+	root      string // 素材根目录（命令行 -root，或拖到图标上的那个文件夹）
+	addr      string // 监听地址，例如 :8080
+	dbPath    string // 审阅状态数据库
+	cacheDir  string // 转码缓存目录
+	token     string // 下载口令，空 = 随机生成
+	openDL    bool   // 关闭下载口令校验
+	vjobs     int    // 视频预热并发数
+	qcHW      string // QC 视频解码："cpu"=软解；"cuda"/"qsv"/"d3d11va"=只用那一条；"auto"=探测择优。对应 -qcdec
+	encHW     string // 视频转码编码："cpu"=libx264；"nvenc"/"qsv"/"amf"=只用那一个；"auto"=择优。对应 -enc
+	autoClose bool   // QC 全部完成后自动退出（硬件测试脚本用）
+	vres      int    // 视频转码规格（较小边封顶）
+	ires      int    // 图片预览规格（较小边封顶）
+	vkeep     bool   // 保留上一轮的转码产物
+	autoOpen  bool   // 启动后自动打开下载页
+	logFile   string // 日志文件路径
+	csvPath   string // 退出时把审阅标记导出的 CSV 路径（空 = 与数据库同目录 <库名>-review.csv）
 }
 
 // app 一次运行起来的全部零件。
@@ -54,6 +58,7 @@ type app struct {
 	scanner *Scanner
 	videos  *VideoService
 	images  *ImageService
+	qc      *QCManager
 	hub     *Hub
 	h       *Handler
 
@@ -79,6 +84,9 @@ type app struct {
 	warmMu     sync.Mutex
 	warmCancel context.CancelFunc
 	warmSeq    int
+	// warmConc 这次预热要用几个转码并发。0 = 用配置里的 vjobs；
+	// 视频转码与 QC 并行时由启动流程压到 2，免得 ffmpeg 进程总数失控。
+	warmConc int
 
 	cleanupOnce sync.Once // 退出清缓存只做一次（defer Close / Ctrl+C / 停止按钮 多个入口）
 
@@ -106,6 +114,7 @@ func newApp(cfg appConfig, logs *logRing, logPath string) (*app, error) {
 	if err != nil {
 		return nil, err
 	}
+	a.qc = NewQCManager(findTool("ffmpeg"), findTool("ffprobe"), cfg.cacheDir, a.store, a.hub)
 
 	tok := cfg.token
 	if tok == "" {
@@ -118,6 +127,7 @@ func newApp(cfg appConfig, logs *logRing, logPath string) (*app, error) {
 		scanner: a.scanner,
 		video:   a.videos,
 		images:  a.images,
+		qc:      a.qc,
 		hub:     a.hub,
 		dlToken: tok,
 		noToken: cfg.openDL,
@@ -128,17 +138,71 @@ func newApp(cfg appConfig, logs *logRing, logPath string) (*app, error) {
 	}
 	// reviewURL / downloadURL / lanURLs 要等端口真正占住、拿到真实端口后才填
 
-	// 扫描完成后 invalidate 掉目录计数缓存，并把视频预热顶起来
+	// 显卡选择拆成两路（2026-10-04）：转码编码与 QC 解码各问各的，互不牵连。
+	// 视频**转码编码**：cpu=libx264 / nvenc|qsv|amf=只用那一个 / auto=都比速度（快 20%+ 才换）
+	a.videos.SetEncChoice(a.cfg.encHW)
+	// 视频 **QC 解码**：cpu=软解 / cuda|qsv|d3d11va=只用那一条 / auto=探测择优（结论存库复用）
+	a.qc.SetHWChoice(a.cfg.qcHW)
+	// 探测结论存库：硬件不变的话下次启动直接复用，省掉 4 段 30 秒素材的试跑（~7 秒）
+	a.qc.SetMetaStore(a.store)
+	// 扫描完成后 invalidate 掉目录计数缓存，并按用户定的顺序串行跑四步：
+	// ① 图片转码预热 → ② 图片 QC → ③ 视频转码 → ④ 视频 QC（2026-10-01）。
+	// 全在一个后台 goroutine 里顺序执行 —— 视频转码/QC 都是重活，和图片的混跑
+	// 会抢 ffmpeg，启动阶段反而更慢。
 	a.scanner.onFinish = func() {
 		a.store.invalidate()
-		a.startWarmup()
+		go func() {
+			// ① 图片转码预热：全库图片逐目录预热（浏览器还没进来就先把缩略图备好）
+			if ids, err := a.store.FolderDescendants(1); err == nil {
+				a.images.WarmFolders(append([]int64{1}, ids...)...)
+			} else {
+				log.Printf("图片预热跳过（列目录失败）: %v", err)
+			}
+			log.Println("顺序执行 ①/④ 图片转码预热完成")
+			// ② 图片 QC
+			a.qc.WarmKind(kindImage)
+			log.Println("顺序执行 ②/④ 图片 QC 完成")
+			// ③④ 视频转码 ∥ 视频 QC（2026-10-02 起并行，原来是串行的）：
+			// 两者不再抢同一个瓶颈 —— 转码编码有显卡编码器（NVENC/QSV/AMF），
+			// QC 解码是 CPU 软解（实测显卡解码反而慢一倍）。于是同时开跑，
+			// 墙钟从「两串之和」变成「取较长者」。
+			// 转码并发压到 2 路：它的活轻了（GPU 编码 ~0.7s vs 软编 2.6s），
+			// 重活是 QC 那边 3 路并发的全片抽帧， ffmpeg 进程总数控制在 5 个以内。
+			a.warmConc = 2
+			var wgPar sync.WaitGroup
+			wgPar.Add(1)
+			go func() {
+				defer wgPar.Done()
+				// ③ 视频转码（WarmUp 内部会打"启动成功"横幅）
+				a.startWarmup()
+			}()
+			// ④ 视频 QC
+			a.qc.WarmKind(kindVideo)
+			log.Println("并行执行 ④/④ 视频 QC 完成")
+			wgPar.Wait()
+			log.Println("并行执行 ③/④ 视频转码完成")
+			a.warmConc = 0
+			// autoclose：硬件测试脚本用 —— QC 全部完成后优雅退出（先落库再退）
+			if a.cfg.autoClose {
+				log.Println("autoclose: 全部完成，自动退出")
+				go func() {
+					time.Sleep(300 * time.Millisecond)
+					a.Close()
+					os.Exit(0)
+				}()
+			}
+		}()
 	}
 	return a, nil
 }
 
-// Close 进程退出前的收尾：取消预热、清空临时缓存、释放数据库。
+// Close 进程退出前的收尾：取消预热、清空临时缓存、释放数据库、清掉整库。
+//
 // 正常返回路径（窗口关闭 / main return）都会走到；被硬杀（关黑窗口/taskkill）
-// 没机会执行 —— 那种情况留给下次启动的 PrepareCache 兜底。
+// 没机会执行 —— 那种情况由 main() 里的**启动兜底 wipeDB** 接住，
+// 所以无论怎么退，桌面都不会留下上一轮的库。
+//
+// 清库必须排在 a.db.Close() 之后：句柄没放就删文件，Windows 上删不掉（文件被占用）。
 func (a *app) Close() {
 	a.cleanupTemp()
 	a.warmMu.Lock()
@@ -148,8 +212,12 @@ func (a *app) Close() {
 	}
 	a.warmMu.Unlock()
 	if a.db != nil {
+		// 先落 CSV 再关库：库一关就查不动 review 了，而这份 CSV 是标记唯一的去处。
+		exportReviewCSV(reviewCSVMakePath(a.cfg.dbPath, a.cfg.csvPath), a.db)
 		_ = a.db.Close()
 	}
+	// 退出即全清：连 medreview.db / -wal / -shm 一起删，下次启动重新建空库。
+	wipeDB(a.cfg.dbPath)
 }
 
 // ---------------------------------------------------------------- 绑定端口与地址
@@ -340,6 +408,7 @@ func (a *app) prepareCache() {
 // startScan 按上次记录的 / 命令行给的根目录启动首轮扫描。
 // 没有根目录就跑一轮空的预热，好让「启动成功」的提示照常出现。
 func (a *app) startScan() {
+	a.qc.Cancel() // 换目录/重扫：取消上一轮还在跑的质量检测
 	startRoot := a.cfg.root
 	if startRoot == "" {
 		if saved := metaGet(a.db, "root_path"); saved != "" {
@@ -432,8 +501,15 @@ func (a *app) startWarmup() {
 	seq := a.warmSeq
 	a.warmMu.Unlock()
 
+	conc := a.cfg.vjobs
+	a.warmMu.Lock()
+	if a.warmConc > 0 {
+		conc = a.warmConc
+	}
+	a.warmMu.Unlock()
+
 	go func() {
-		a.videos.WarmUp(ctx, a.cfg.vjobs)
+		a.videos.WarmUp(ctx, conc)
 		if ctx.Err() != nil {
 			return // 被下一轮取代了，不报"就绪"
 		}
@@ -490,6 +566,7 @@ func (a *app) SetRoot(p string) error {
 	}
 	a.store.SetRoot(abs)
 	log.Printf("素材根目录已切换: %s", abs)
+	a.qc.Cancel() // 换目录：取消上一轮质量检测
 	if err := a.scanner.Start(abs); err != nil {
 		return err
 	}

@@ -175,11 +175,16 @@ def main():
     check('console 版 /api/status 报 gui=false', st and st.get('gui') is False, st.get('gui') if isinstance(st, dict) else st)
     p3.terminate()
 
-    p4, _ = start(GUI_EXE, PORT, ['-root', MAT_A, '-open=false'], 'srv_gui.log')
-    gst = request(PORT, '/api/status?t=%s' % TOKEN)
-    check('无黑窗版 /api/status 报 gui=true', gst and gst.get('gui') is True, gst.get('gui') if isinstance(gst, dict) else gst)
-    check('无黑窗版 /api/status 可正常访问（没崩）', gst and gst.get('canDownload') is True, (gst or {}).get('canDownload'))
-    p4.terminate()
+    # 2026-10-01：用户不要无黑窗版了，medreview_ui.exe 已从产物里删除。
+    # GUI 段只在 exe 存在时跑（比如手动传 argv[2] 指回某个旧构建做回归）。
+    if os.path.exists(GUI_EXE):
+        p4, _ = start(GUI_EXE, PORT, ['-root', MAT_A, '-open=false'], 'srv_gui.log')
+        gst = request(PORT, '/api/status?t=%s' % TOKEN)
+        check('无黑窗版 /api/status 报 gui=true', gst and gst.get('gui') is True, gst.get('gui') if isinstance(gst, dict) else gst)
+        check('无黑窗版 /api/status 可正常访问（没崩）', gst and gst.get('canDownload') is True, (gst or {}).get('canDownload'))
+        p4.terminate()
+    else:
+        print('  (跳过 GUI 段：%s 已删除 —— 用户 2026-10-01 决定不要无黑窗版)' % os.path.basename(GUI_EXE))
 
     # ---------- ③ 网页控制台接口已彻底移除（防回归，应一律 404）----------
     print('== C. 网页控制台接口已移除（不再通过网页暴露本地信息）==')
@@ -239,8 +244,10 @@ def main():
     ag = open(os.path.join(D, 'app.go'), encoding='utf-8').read() if os.path.exists(os.path.join(D, 'app.go')) else ''
     ok = ('func (a *app) SetRoot(' in ag and 'func (a *app) SetToken(' in ag and 'func (a *app) Rebind(' in ag) if ag else False
     check('app.go 支持运行时改根目录/口令/地址（不用重启）', ok, '' if ag else 'missing')
-    check('两份 exe 都已构建', os.path.exists(CON_EXE) and os.path.exists(GUI_EXE),
-          '%s / %s' % (os.path.exists(CON_EXE), os.path.exists(GUI_EXE)))
+    # 2026-10-01 起只交付控制台版（用户不要无黑窗版）；ui 版若手动构建则顺带确认存在
+    check('控制台 exe 已构建', os.path.exists(CON_EXE), os.path.exists(CON_EXE))
+    if os.path.exists(GUI_EXE):
+        check('无黑窗 exe（若在）也应存在', os.path.exists(GUI_EXE))
     # 前端：无网页控制台
     for html in ('web/review.html', 'web/download.html'):
         ok = 'id="btn-console"' not in open(os.path.join(D, html), encoding='utf-8').read()

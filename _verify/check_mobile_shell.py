@@ -452,9 +452,9 @@ def main():
               ('局域网' in logtext()) or ('未找到可用的局域网地址' in logtext()),
               ' | '.join(l for l in logtext().splitlines() if '局域网' in l)[:150])
 
-        # 重启一次：验证历史用户名"关闭程序后失效"
+        # 重启一次：验证历史用户名**存库后重启仍在**（2026-10-01 改为持久化）
         print()
-        print('=== K. 历史用户名（服务端进程内存）===')
+        print('=== K. 历史用户名（存库，重启不丢）===')
         req(PORT, 'POST', '/api/review',
             {'fileId': jget(PORT, '/api/files?folder=%d&limit=5' % sub_id)['files'][0]['id'],
              'decision': 1}, user='alice')
@@ -466,7 +466,10 @@ def main():
         stop(q, lf)
         q, lf = start(EXE, ['-vres', '720'], 'm1')
         users = jget(PORT, '/api/users')['users']
-        check('重启进程后名单清空（符合「关闭程序后失效」）', users == [], json.dumps(users, ensure_ascii=False))
+        check('重启进程后名单仍在（已改为存库）',
+              ('alice' in users) and ('bob' in users), json.dumps(users, ensure_ascii=False))
+        check('重启后仍是最近使用的排在前面', users and users[0] == 'bob',
+              json.dumps(users, ensure_ascii=False))
         stop(q, lf)
 
         # 只绑回环时的提示

@@ -27,3 +27,12 @@ web_demo/
 _verify/**
 !_verify/*.py
 !_verify/*.md
+
+# ---- 本地基准测试 / 硬件探测产物（含本机 Temp 路径、约 87MB，不入库）----
+medreview-hwtest.zip
+bench-report.txt
+qc-test-log*
+使用说明.txt
+qc-bench.bat
+gen_bench.py
+compare_qc.py

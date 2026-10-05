@@ -2,10 +2,13 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"medreview/qc"
 )
 
 const (
@@ -47,6 +50,67 @@ type FileItem struct {
 	// 以前广播里塞的是 RelPath（字符串），前端拿它和数字 id 比 —— 永远不等，
 	// 那条"别人标了这张图"的实时同步等于一直没生效。不下发给前端。
 	FolderID int64 `json:"-"`
+
+	// QC 质量自动检测结果（辅助提示，不参与 decision）。前端在图片上画徽标 / 脏点框。
+	// 没有检测结果（还没跑 / ffmpeg 缺失）时为 nil。
+	QC *QCInfo `json:"qc,omitempty"`
+}
+
+// QCInfo 是给前端看的检测结果摘要。Boxes 仅在镜头脏污命中时有值（归一化 0~1 坐标）。
+type QCInfo struct {
+	Flags    int  `json:"flags"` // 位掩码：bit0=重复 bit1=损坏 bit2=空镜 bit3=镜头脏污 bit4=模糊 bit5=曝光 bit6=噪点
+	Dup      bool `json:"dup"`
+	Corrupt  bool `json:"corrupt"`
+	Blank    bool `json:"blank"`
+	Dirt     bool `json:"dirt"`
+	Blur     bool `json:"blur"`
+	Exposure bool `json:"exposure"`
+	Noise    bool `json:"noise"`
+	Shake    bool `json:"shake"`
+	// 曝光细分：前端徽标直接显示"欠曝"/"过曝"，比笼统的"曝光"有用
+	ExpUnder bool     `json:"expUnder,omitempty"`
+	ExpOver  bool     `json:"expOver,omitempty"`
+	Boxes    []qc.Box `json:"boxes,omitempty"`
+}
+
+// qcInfoFromResult 由 qc.QCResult 构造前端 DTO。
+// ⚠️ bool 全部从 **Flags 推导**，不从 detail 里的对象推导：
+// 对账 pass 清掉某个位时只改 flags 列，detail 里的对象（如 lensDirt）可能还在，
+// 若从这里推导就会出现"bool 是 true、位掩码却没有"的自相矛盾。
+func qcInfoFromResult(r *qc.QCResult) *QCInfo {
+	if r == nil {
+		return nil
+	}
+	info := &QCInfo{
+		Flags:    r.Flags,
+		Dup:      r.Flags&qc.FlagDup != 0,
+		Corrupt:  r.Flags&qc.FlagCorrupted != 0,
+		Blank:    r.Flags&qc.FlagBlank != 0,
+		Dirt:     r.Flags&qc.FlagLensDirt != 0,
+		Blur:     r.Flags&qc.FlagBlur != 0,
+		Exposure: r.Flags&qc.FlagExposure != 0,
+		Noise:    r.Flags&qc.FlagNoise != 0,
+		Shake:    r.Flags&qc.FlagShake != 0,
+	}
+	if r.LensDirt != nil {
+		info.Boxes = r.LensDirt.Boxes
+	}
+	if r.Exposure != nil {
+		info.ExpUnder, info.ExpOver = r.Exposure.Under, r.Exposure.Over
+	}
+	return info
+}
+
+// qcInfoFromDetail 从落库的 JSON 串还原前端 DTO。
+func qcInfoFromDetail(detail string) *QCInfo {
+	if detail == "" {
+		return nil
+	}
+	var r qc.QCResult
+	if err := json.Unmarshal([]byte(detail), &r); err != nil {
+		return nil
+	}
+	return qcInfoFromResult(&r)
 }
 
 type Store struct {
@@ -101,6 +165,12 @@ func (s *Store) SetRoot(p string) {
 	s.root = p
 	s.rootMu.Unlock()
 }
+
+// MetaGet 取一条元信息（不存在返回空串）。
+func (s *Store) MetaGet(k string) string { return metaGet(s.db, k) }
+
+// MetaSet 写一条元信息（存在就覆盖）。
+func (s *Store) MetaSet(k, v string) error { return metaSet(s.db, k, v) }
 
 // absPath 把相对索引路径还原成磁盘绝对路径。
 func (s *Store) absPath(rel string) string {
@@ -294,8 +364,10 @@ func (s *Store) allClaims() (map[int64]string, error) {
 
 // FilePage 用 keyset 分页，避免深翻页时 OFFSET 变慢。
 func (s *Store) FilePage(folderID int64, afterName string, afterID int64, limit int, filter string) ([]FileItem, error) {
-	q := `SELECT f.id, f.name, f.rel_path, f.size, f.kind, COALESCE(r.decision,0), COALESCE(r.reviewer,''), f.mtime
+	q := `SELECT f.id, f.name, f.rel_path, f.size, f.kind, COALESCE(r.decision,0), COALESCE(r.reviewer,''), f.mtime,
+			COALESCE(qc.flags,0), COALESCE(qc.detail,'')
 		FROM file f LEFT JOIN review r ON r.file_id = f.id
+		LEFT JOIN qc ON qc.file_id = f.id
 		WHERE f.folder_id = ?`
 	args := []any{folderID}
 	if afterID > 0 {
@@ -313,6 +385,13 @@ func (s *Store) FilePage(folderID int64, afterName string, afterID int64, limit 
 		q += ` AND f.kind = 2`
 	case "image":
 		q += ` AND f.kind = 1`
+	// 质量筛选（纯视图过滤，与打包口径无关：打包仍然只认 decision=1）
+	case "qcdup":
+		q += ` AND (COALESCE(qc.flags,0) & ?) > 0`
+		args = append(args, qc.FlagDup)
+	case "qcissue":
+		q += ` AND (COALESCE(qc.flags,0) & ?) > 0`
+		args = append(args, qc.FlagIssueMask)
 	}
 	q += ` ORDER BY f.sort_key, f.id LIMIT ?`
 	args = append(args, limit)
@@ -325,8 +404,15 @@ func (s *Store) FilePage(folderID int64, afterName string, afterID int64, limit 
 	out := []FileItem{}
 	for rows.Next() {
 		var it FileItem
-		if err := rows.Scan(&it.ID, &it.Name, &it.RelPath, &it.Size, &it.Kind, &it.Decision, &it.Reviewer, &it.MTime); err != nil {
+		var qcFlags int
+		var qcDetail string
+		if err := rows.Scan(&it.ID, &it.Name, &it.RelPath, &it.Size, &it.Kind, &it.Decision, &it.Reviewer, &it.MTime,
+			&qcFlags, &qcDetail); err != nil {
 			return nil, err
+		}
+		it.QC = qcInfoFromDetail(qcDetail)
+		if it.QC != nil {
+			it.QC.Flags = qcFlags
 		}
 		out = append(out, it)
 	}
@@ -379,6 +465,47 @@ func (s *Store) AllVideos() ([]FileItem, error) {
 func (s *Store) FolderImages(folderID int64) ([]FileItem, error) {
 	rows, err := s.db.Query(`SELECT f.id, f.name, f.rel_path, f.size, f.kind, 0, '', f.mtime
 		FROM file f WHERE f.folder_id = ? AND f.kind = ? AND f.present = 1 ORDER BY f.id`, folderID, kindImage)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []FileItem{}
+	for rows.Next() {
+		var it FileItem
+		if err := rows.Scan(&it.ID, &it.Name, &it.RelPath, &it.Size, &it.Kind, &it.Decision, &it.Reviewer, &it.MTime); err != nil {
+			return nil, err
+		}
+		out = append(out, it)
+	}
+	return out, rows.Err()
+}
+
+// FolderMedia 返回目录本层的全部素材（图片+视频），供质量自动检测用。
+// 与 FolderImages 分开：后者只给图片预览预热用，不该把视频也拉去转码预览。
+func (s *Store) FolderMedia(folderID int64) ([]FileItem, error) {
+	rows, err := s.db.Query(`SELECT f.id, f.name, f.rel_path, f.size, f.kind, 0, '', f.mtime
+		FROM file f WHERE f.folder_id = ? AND f.kind IN (?, ?) AND f.present = 1 ORDER BY f.id`,
+		folderID, kindImage, kindVideo)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []FileItem{}
+	for rows.Next() {
+		var it FileItem
+		if err := rows.Scan(&it.ID, &it.Name, &it.RelPath, &it.Size, &it.Kind, &it.Decision, &it.Reviewer, &it.MTime); err != nil {
+			return nil, err
+		}
+		out = append(out, it)
+	}
+	return out, rows.Err()
+}
+
+// AllMedia 返回库里全部素材（图片+视频），供扫描完成后的全量质量预检。
+func (s *Store) AllMedia(kind int) ([]FileItem, error) {
+	// kind <= 0 表示全部（图片+视频）；QC 分阶段跑（先图片后视频）时按 kind 取
+	rows, err := s.db.Query(`SELECT f.id, f.name, f.rel_path, f.size, f.kind, 0, '', f.mtime
+		FROM file f WHERE f.present = 1 AND (? <= 0 OR f.kind = ?) ORDER BY f.id`, kind, kind)
 	if err != nil {
 		return nil, err
 	}
@@ -620,4 +747,257 @@ func (s *Store) invalidate() {
 	s.mu.Lock()
 	s.statMap = nil
 	s.mu.Unlock()
+}
+
+// ---------------------------------------------------------------- 质量自动检测（qc）
+
+// QCStat 一个目录里质量标记的汇总，给工具栏/侧栏的角标用。
+type QCStat struct {
+	Total    int `json:"total"`
+	Dup      int `json:"dup"`
+	Corrupt  int `json:"corrupt"`
+	Blank    int `json:"blank"`
+	Dirt     int `json:"dirt"`
+	Blur     int `json:"blur"`
+	Exposure int `json:"exposure"`
+	Noise    int `json:"noise"`
+	Shake    int `json:"shake"`
+}
+
+// SaveQC 落库单文件检测结果（按 file_id upsert）。size/mtime/qc_version 用于失效判定。
+// res 为 nil 时不清库（nil 表示「这次没跑」，别把已有的结论擦掉）。
+func (s *Store) SaveQC(fileID int64, res *qc.QCResult, size, mtime int64, device, shootKey string) error {
+	detail := ""
+	var flags int
+	var hash string
+	if res != nil {
+		detail = res.Detail()
+		flags = res.Flags
+		hash = res.DupHash
+	}
+	_, err := s.db.Exec(`INSERT INTO qc(file_id, flags, detail, dup_hash, device, shoot_key, size, mtime, qc_version, updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(file_id) DO UPDATE SET
+			flags=excluded.flags, detail=excluded.detail, dup_hash=excluded.dup_hash,
+			device=excluded.device, shoot_key=excluded.shoot_key,
+			size=excluded.size, mtime=excluded.mtime, qc_version=excluded.qc_version, updated_at=excluded.updated_at`,
+		fileID, flags, detail, hash, device, shootKey, size, mtime, qc.QCVersion, time.Now().Unix())
+	return err
+}
+
+// QCRow 对账 pass 用的一行检测结果。
+type QCRow struct {
+	FileID   int64
+	RelPath  string
+	Flags    int
+	DupHash  string
+	Detail   string
+	Device   string
+	ShootKey string
+}
+
+// AllQCRows 全量拉检测结果给对账 pass 用。detail 里带脏点框坐标，
+// 几千行也就几 MB，一次拉完比逐条查省事。
+func (s *Store) AllQCRows() ([]QCRow, error) {
+	rows, err := s.db.Query(`SELECT q.file_id, f.rel_path, q.flags, q.dup_hash, q.detail, q.device, q.shoot_key
+		FROM qc q JOIN file f ON f.id = q.file_id WHERE q.qc_version = ?`, qc.QCVersion)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []QCRow{}
+	for rows.Next() {
+		var r QCRow
+		if err := rows.Scan(&r.FileID, &r.RelPath, &r.Flags, &r.DupHash, &r.Detail, &r.Device, &r.ShootKey); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// UpdateQCFlags 对账后改某文件的位掩码（不碰 detail —— flags 才是前端 bool 的唯一真相源）。
+// 返回旧 flags，方便调用方判断是否真的变了（变了才要广播）。
+func (s *Store) UpdateQCFlags(fileID int64, flags int) (int, error) {
+	var old int
+	err := s.db.QueryRow(`SELECT flags FROM qc WHERE file_id=?`, fileID).Scan(&old)
+	if err != nil {
+		return 0, err
+	}
+	if old == flags {
+		return old, nil
+	}
+	_, err = s.db.Exec(`UPDATE qc SET flags=?, updated_at=? WHERE file_id=?`,
+		flags, time.Now().Unix(), fileID)
+	return old, err
+}
+
+// RememberUser 记下这次用到的批注名，最近使用的排最前。
+// 空名字和「匿名」不记。超出上限的旧名字顺手清掉。
+func (s *Store) RememberUser(name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" || name == "匿名" {
+		return nil
+	}
+	// 用**毫秒**：秒级精度下，连续操作的两个名字 last_used 会相同，
+	// 排序就成了"看心情"（同值行的顺序不确定），列表顺序会莫名其妙地变。
+	if _, err := s.db.Exec(`INSERT INTO known_user(name, last_used) VALUES(?,?)
+		ON CONFLICT(name) DO UPDATE SET last_used=excluded.last_used`,
+		name, time.Now().UnixMilli()); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(`DELETE FROM known_user WHERE name NOT IN (
+		SELECT name FROM known_user ORDER BY last_used DESC, rowid DESC LIMIT ?)`, maxRememberedUsers)
+	return err
+}
+
+// KnownUsers 返回见过的批注名（最近使用的在前）。
+// 末尾加 rowid DESC 兜底：万一 last_used 还是撞了，至少顺序是确定的（后插入的在前）。
+func (s *Store) KnownUsers() ([]string, error) {
+	rows, err := s.db.Query(`SELECT name FROM known_user ORDER BY last_used DESC, rowid DESC LIMIT ?`, maxRememberedUsers)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
+// QCIssue 问题清单里的一行：QC 检出问题的文件。
+type QCIssue struct {
+	Name     string
+	RelPath  string
+	Flags    int
+	Detail   string
+	Decision int
+}
+
+// QCIssues 列出这些目录（含树）下所有 QC 检出问题的文件（flags != 0）。
+// 给"问题清单 CSV"用 —— 损坏、重复、模糊这些不再只在界面上看，能导出成表。
+func (s *Store) QCIssues(folderIDs []int64) ([]QCIssue, error) {
+	if len(folderIDs) == 0 {
+		return nil, nil
+	}
+	q := `SELECT f.name, f.rel_path, COALESCE(r.decision,0), qc.flags, qc.detail
+		FROM file f
+		JOIN qc ON qc.file_id = f.id AND qc.flags != 0 AND qc.qc_version = ?
+		LEFT JOIN review r ON r.file_id = f.id
+		WHERE f.present = 1 AND f.folder_id IN (`
+	args := []any{qc.QCVersion}
+	for i, id := range folderIDs {
+		if i > 0 {
+			q += ","
+		}
+		q += "?"
+		args = append(args, id)
+	}
+	q += `) ORDER BY f.folder_id, f.sort_key, f.id`
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []QCIssue{}
+	for rows.Next() {
+		var it QCIssue
+		if err := rows.Scan(&it.Name, &it.RelPath, &it.Decision, &it.Flags, &it.Detail); err != nil {
+			return nil, err
+		}
+		out = append(out, it)
+	}
+	return out, rows.Err()
+}
+
+// QCInfoByID 读单条检测结果（对账后广播用）。
+func (s *Store) QCInfoByID(fileID int64) *QCInfo {
+	var detail string
+	err := s.db.QueryRow(`SELECT detail FROM qc WHERE file_id=?`, fileID).Scan(&detail)
+	if err != nil {
+		return nil
+	}
+	info := qcInfoFromDetail(detail)
+	if info != nil {
+		var flags int
+		_ = s.db.QueryRow(`SELECT flags FROM qc WHERE file_id=?`, fileID).Scan(&flags)
+		info.Flags = flags
+	}
+	return info
+}
+
+// DupCand 同 hash 的候选对端（重复判定的候选，不是结论）。
+type DupCand struct {
+	RelPath  string
+	Device   string
+	ShootKey string
+}
+
+// OtherDupHashCandidates 全库查找「不是自己、且非损坏」的相同 pHash 文件。
+// hash 相同只是**候选**：背景相同的连拍（主体不同）、同场景不同时刻的拍摄
+// hash 都可能一样。调用方必须再过两道关：
+//  1. 时间/设备约束（用户 2026-10-01：整体相似但时间不同、机器不同的不算重复）
+//  2. 像素级确认（PixelDiffRatio，显著差异占比 > 5% = 主体不同）
+func (s *Store) OtherDupHashCandidates(hash string, exclude int64) ([]DupCand, error) {
+	if hash == "" {
+		return nil, nil
+	}
+	rows, err := s.db.Query(`SELECT f.rel_path, q.device, q.shoot_key FROM qc q JOIN file f ON f.id = q.file_id
+		WHERE q.dup_hash=? AND q.file_id<>? AND (q.flags & ?)=0 LIMIT 20`,
+		hash, exclude, qc.FlagCorrupted)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []DupCand{}
+	for rows.Next() {
+		var c DupCand
+		if err := rows.Scan(&c.RelPath, &c.Device, &c.ShootKey); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// QCStats 统计某目录「本层」（present=1）各质量标记的数量。
+func (s *Store) QCStats(folderID int64) (QCStat, error) {
+	var st QCStat
+	err := s.db.QueryRow(`
+		SELECT COUNT(*),
+			COALESCE(SUM(CASE WHEN (qc.flags & ?)>0 THEN 1 ELSE 0 END),0),
+			COALESCE(SUM(CASE WHEN (qc.flags & ?)>0 THEN 1 ELSE 0 END),0),
+			COALESCE(SUM(CASE WHEN (qc.flags & ?)>0 THEN 1 ELSE 0 END),0),
+			COALESCE(SUM(CASE WHEN (qc.flags & ?)>0 THEN 1 ELSE 0 END),0),
+			COALESCE(SUM(CASE WHEN (qc.flags & ?)>0 THEN 1 ELSE 0 END),0),
+			COALESCE(SUM(CASE WHEN (qc.flags & ?)>0 THEN 1 ELSE 0 END),0),
+			COALESCE(SUM(CASE WHEN (qc.flags & ?)>0 THEN 1 ELSE 0 END),0),
+			COALESCE(SUM(CASE WHEN (qc.flags & ?)>0 THEN 1 ELSE 0 END),0)
+		FROM file f JOIN qc ON qc.file_id = f.id
+		WHERE f.folder_id=? AND f.present=1`,
+		qc.FlagDup, qc.FlagCorrupted, qc.FlagBlank, qc.FlagLensDirt,
+		qc.FlagBlur, qc.FlagExposure, qc.FlagNoise, qc.FlagShake, folderID).
+		Scan(&st.Total, &st.Dup, &st.Corrupt, &st.Blank, &st.Dirt,
+			&st.Blur, &st.Exposure, &st.Noise, &st.Shake)
+	return st, err
+}
+
+// HasQC 文件是否已有有效（qc_version 匹配）的检测结果。供后台触发时跳过已算过的。
+func (s *Store) HasQC(fileID, size, mtime int64) (bool, error) {
+	var ver int64
+	var sz, mt int64
+	err := s.db.QueryRow(`SELECT qc_version, size, mtime FROM qc WHERE file_id=?`, fileID).
+		Scan(&ver, &sz, &mt)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return ver == qc.QCVersion && sz == size && mt == mtime, nil
 }

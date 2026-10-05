@@ -22,65 +22,69 @@ type Handler struct {
 	scanner *Scanner
 	video   *VideoService
 	images  *ImageService
+	qc      *QCManager
 	hub     *Hub
 	dlToken string
 	noToken bool
 
 	// --- 网页控制台用（无黑窗版没有命令行窗口，地址/口令/日志只能在网页里看）---
-	logs       *logRing  // 日志环形缓冲，给 /api/console 增量拉
-	reviewURL  string    // 本机审阅页地址
+	logs        *logRing // 日志环形缓冲，给 /api/console 增量拉
+	reviewURL   string   // 本机审阅页地址
 	downloadURL string   // 本机下载页地址（含口令）
-	lanURLs    []string  // 局域网地址
-	logPath    string    // 日志文件落盘路径（面板上给个「打开日志」入口）
-	gui        bool      // 是不是无黑窗版（是的话才显示「停止服务」这类按钮）
+	lanURLs     []string // 局域网地址
+	logPath     string   // 日志文件落盘路径（面板上给个「打开日志」入口）
+	gui         bool     // 是不是无黑窗版（是的话才显示「停止服务」这类按钮）
 
 	mu      sync.Mutex
 	totals  Totals
 	totalsT time.Time
 
-	// 见过的批注名，给前端「最近用过…」下拉用。
-	// 只放在进程内存里 —— 程序一关就没了，正好符合"刷新还在、关掉程序失效"的预期，
-	// 也不占数据库、不需要清理。
-	usersMu sync.Mutex
-	users   []string
+	// 见过的批注名现在**存数据库**（见 store.RememberUser），关掉程序也还记得。
+	// 这里只留一张"上次落库时间"表，用来节流：每个请求都带 X-User，
+	// 不节流的话等于每个请求写一次库。
+	usersMu  sync.Mutex
+	userSeen map[string]int64
 }
 
 // 历史名字最多记这么多条（最近使用的排在最前）
 const maxRememberedUsers = 20
 
-// rememberUser 记下这次用到的批注名。空名字和"匿名"不入库。
+// 同一个名字多久之内不重复落库（last_used 只用来排序，精度无所谓）
+const userThrottleSec = 300
+
+// rememberUser 记下这次用到的批注名（落库，关掉程序也还记得）。
+// 同一个名字在 userThrottleSec 内只写一次库，避免每个请求都写。
 func (h *Handler) rememberUser(name string) {
 	name = strings.TrimSpace(name)
-	if name == "" || name == "匿名" {
+	if name == "" || name == "匿名" || h.store == nil {
 		return
 	}
+	now := time.Now().Unix()
 	h.usersMu.Lock()
-	defer h.usersMu.Unlock()
-	out := make([]string, 0, len(h.users)+1)
-	out = append(out, name)
-	for _, u := range h.users {
-		if u != name {
-			out = append(out, u)
+	last, seen := h.userSeen[name]
+	if seen && now-last < userThrottleSec {
+		h.usersMu.Unlock()
+		return
+	}
+	if h.userSeen == nil {
+		h.userSeen = map[string]int64{}
+	}
+	h.userSeen[name] = now
+	h.usersMu.Unlock()
+	if err := h.store.RememberUser(name); err != nil {
+		log.Printf("记住批注名失败: %v", err)
+	}
+}
+
+// handleUsers 返回见过的批注名（最近优先）。存库的，重启服务不会丢。
+func (h *Handler) handleUsers(w http.ResponseWriter, r *http.Request) {
+	users := []string{}
+	if h.store != nil {
+		if u, err := h.store.KnownUsers(); err == nil {
+			users = u
 		}
 	}
-	if len(out) > maxRememberedUsers {
-		out = out[:maxRememberedUsers]
-	}
-	h.users = out
-}
-
-func (h *Handler) knownUsers() []string {
-	h.usersMu.Lock()
-	defer h.usersMu.Unlock()
-	out := make([]string, len(h.users))
-	copy(out, h.users)
-	return out
-}
-
-// handleUsers 返回本进程见过的批注名（最近优先）。
-// 注意是进程内存：关掉服务就清空，刷新页面/换设备仍能看到。
-func (h *Handler) handleUsers(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]any{"users": h.knownUsers()})
+	writeJSON(w, map[string]any{"users": users})
 }
 
 type Totals struct {
@@ -101,6 +105,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /api/folders", h.handleFolders)
 	mux.HandleFunc("GET /api/folder", h.handleFolderInfo)
 	mux.HandleFunc("GET /api/files", h.handleFiles)
+	mux.HandleFunc("GET /api/qc/status", h.handleQCStatus)
 	mux.HandleFunc("POST /api/review", h.handleReview)
 	mux.HandleFunc("POST /api/review/batch", h.handleReviewBatch)
 	// 清空「本层」目录的全部标记（不含子目录）。与 /api/review/batch 分开是因为
@@ -118,6 +123,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /api/vtrans-warmup", h.handleVTransWarmup)
 	mux.HandleFunc("GET /api/zip", h.handleZip)
 	mux.HandleFunc("GET /api/export", h.handleExportList)
+	mux.HandleFunc("GET /api/qc-report", h.handleQCReport)
 	mux.HandleFunc("POST /api/copy", h.handleCopy)
 	mux.HandleFunc("GET /api/browse-dest", h.handleBrowseDest)
 	// 控制台：gui 版（medreview_ui.exe）用**本地桌面窗口**（gui_walk.go 的 runGUI）显示
@@ -420,6 +426,23 @@ func (h *Handler) handleFolderInfo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"folder": n, "marked": marked, "markedMine": markedMine, "files": files})
 }
 
+// handleQCStatus 返回某目录「本层」质量自动检测的汇总计数（重复/损坏/空镜/镜头脏污）。
+// 前端在工具栏/侧栏角标展示；与 /api/files 里的逐文件 qc 互补：这里给汇总，那里给明细。
+func (h *Handler) handleQCStatus(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.ParseInt(r.URL.Query().Get("folder"), 10, 64)
+	if id <= 0 {
+		id = 1
+	}
+	st, err := h.store.QCStats(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// 直接回结构体：字段由 QCStat 的 json tag 决定，加检测器时不用再改这里
+	// （之前手写成 5 个 key，加了模糊/曝光/噪点后忘记同步，接口就悄悄少三个字段）。
+	writeJSON(w, st)
+}
+
 func (h *Handler) handleFiles(w http.ResponseWriter, r *http.Request) {
 	folderID, _ := strconv.ParseInt(r.URL.Query().Get("folder"), 10, 64)
 	if folderID <= 0 {
@@ -464,6 +487,10 @@ func (h *Handler) handleFiles(w http.ResponseWriter, r *http.Request) {
 		} else {
 			go h.images.WarmFolder(folderID)
 		}
+	}
+	// 同一目录的质量自动检测也在后台触发（已算过的按 size/mtime 跳过，几乎零成本）。
+	if h.qc != nil {
+		go h.qc.WarmFolder(folderID)
 	}
 	writeJSON(w, map[string]any{"files": items})
 }
