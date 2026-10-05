@@ -15,8 +15,7 @@ check_image_preview.py —— 图片低清预览验收（对部署 exe 跑）
   I. -ires 改档：重启后预览变 800，旧缓存被清空（.profile 换标签）
   J. 源码断言：zip 客户端中断降噪、image.go 关键结构
 
-注意：需要 Pillow（读图片尺寸/EXIF），用 venv 的 python 跑：
-  %USERPROFILE%\.workbuddy\binaries\python\envs\default\Scripts\python.exe
+注意：需要 Pillow（读图片尺寸/EXIF），用任意装了 Pillow 的 Python 跑即可（python3 或 venv 均可）。
 
 自造素材（ffmpeg 合成）、自起停服务（独立端口 8105）、隔离 cwd（不碰项目 urls.txt）。
 任何 FAIL → 退出码非 0。
