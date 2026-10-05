@@ -253,6 +253,6 @@ check_token_random.py      下载口令随机性、启动器不写死口令
 
 ## 许可证
 
-MIT，见 [LICENSE](./LICENSE)。
+AGPL-3.0（GNU Affero General Public License v3.0），见 [LICENSE](./LICENSE)。
 
 第三方组件：构建时通过 `go:embed` 打包的 `ffmpeg` / `ffprobe`（[FFmpeg](https://ffmpeg.org/)，依其自身许可证发布，本项目不随仓库分发，需自行准备）。
