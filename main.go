@@ -74,6 +74,16 @@ func main() {
 	*token = strings.Trim(strings.TrimSpace(*token), `"`)
 	*addr = strings.Trim(strings.TrimSpace(*addr), `"`)
 
+	// ---------- 是否显式指定了 -db ----------
+	// 没写就用默认的 medreview.db，启动/退出都自动清库（临时库，关掉即全清）；
+	// 一旦用户显式写了 -db <文件>，就视为"要跨重启保留"，启动和退出都不再自动清库。
+	dbExplicit := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "db" {
+			dbExplicit = true
+		}
+	})
+
 	// ---------- -gpuinfo：只列显卡就退出 ----------
 	// 必须排在建日志和 wipeDB **之前**：这是一个纯查询，不能碰数据库、
 	// 更不能把上次那个库删了（bat 启动时第一件事就是调它）。
@@ -132,11 +142,16 @@ func main() {
 	//    表面看不出异常，记录直接读不回来了。所以先探一下端口：
 	//    探不动 → 库原样留着（下面 bind() 会给「端口已被占用」的人话提示并退出）；
 	//    探得动 → 没人在用 → 此刻 openDB 还没跑，删得干干净净。
+	//    特例：用户显式写了 -db <文件> 时视为要跨重启保留，无论端口情况都不清库。
 	if ln, verr := net.Listen("tcp", *addr); verr != nil {
 		log.Printf("端口被占用（%s），跳过本次清库 —— 不碰上一个实例的数据库", *addr)
 	} else {
 		_ = ln.Close()
-		wipeDB(*dbPath)
+		if dbExplicit {
+			log.Printf("显式指定了 -db=%s，保留数据库（启动不清库，跨重启持久化）", *dbPath)
+		} else {
+			wipeDB(*dbPath)
+		}
 	}
 
 	// ---------- 硬件选择：优先级 显式 -enc/-qcdec > 兼容 -gpuqc > 默认软解 ----------
@@ -165,22 +180,23 @@ func main() {
 	webFS = sub
 
 	cfg := appConfig{
-		root:      *root,
-		addr:      *addr,
-		dbPath:    *dbPath,
-		cacheDir:  *cacheDir,
-		token:     *token,
-		openDL:    *openDL,
-		vjobs:     *vjobs,
-		qcHW:      qcHW,
-		encHW:     encHW,
-		vres:      *vres,
-		ires:      *ires,
-		vkeep:     *vkeep,
-		autoOpen:  *autoOpen,
-		autoClose: *autoClose,
-		logFile:   *logFile,
-		csvPath:   *csvPath,
+		root:       *root,
+		addr:       *addr,
+		dbPath:     *dbPath,
+		dbExplicit: dbExplicit,
+		cacheDir:   *cacheDir,
+		token:      *token,
+		openDL:     *openDL,
+		vjobs:      *vjobs,
+		qcHW:       qcHW,
+		encHW:      encHW,
+		vres:       *vres,
+		ires:       *ires,
+		vkeep:      *vkeep,
+		autoOpen:   *autoOpen,
+		autoClose:  *autoClose,
+		logFile:    *logFile,
+		csvPath:    *csvPath,
 	}
 
 	a, err := newApp(cfg, logRing500, logFilePath)

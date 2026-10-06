@@ -279,6 +279,42 @@ select, input[type=text] {
   position: absolute; box-sizing: border-box;
   border: 2px solid rgba(255,70,70,.95); background: rgba(255,40,40,.18);
 }
+/* 构图辅助线覆盖层：与脏点框同机制（复制图片 transform），不拦截鼠标 */
+.lb-guides-layer {
+  position: absolute; inset: 0; pointer-events: none; z-index: 1;
+  transform-origin: center center; will-change: transform;
+}
+/* 黄金螺旋起点落在对角角点、半径按对角线算，必然甩出图片矩形 → 必须裁剪，
+   否则辅助线会盖到灯箱黑底上，看着像画错了。 */
+.lb-guides-layer svg { display: block; overflow: hidden; }
+.lb-guides-layer line,
+.lb-guides-layer circle,
+.lb-guides-layer path {
+  fill: none;
+  stroke: rgba(255,255,255,.85);
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;   /* 缩放时线宽恒定，始终清晰 */
+}
+/* 灯箱工具栏「辅助线」「问题框」按钮 + 可叠加清单面板 */
+.lb-guides-btn.on,
+.lb-dirt-btn.on { background: rgba(255,255,255,.32) !important; }
+.lb-guides-panel {
+  position: absolute; top: 56px; right: 16px; z-index: 6;
+  background: rgba(18,18,22,.94); border: 1px solid rgba(255,255,255,.18);
+  border-radius: 8px; padding: 8px 10px; min-width: 144px;
+  box-shadow: 0 6px 20px rgba(0,0,0,.45);
+}
+.lb-guides-panel .lb-guides-row {
+  display: flex; align-items: center; gap: 8px; padding: 4px 2px;
+  color: #fff; font-size: 13px; cursor: pointer; user-select: none;
+}
+.lb-guides-panel .lb-guides-num {
+  display: inline-flex; width: 18px; height: 18px; flex: 0 0 auto;
+  align-items: center; justify-content: center;
+  background: rgba(255,255,255,.16); border-radius: 4px; font-size: 11px;
+}
+.lb-guides-panel .lb-guides-row input { accent-color: #4da3ff; margin: 0; }
+html.is-phone .lb-guides-panel { right: 8px; top: 50px; min-width: 124px; }
 /* 左右两列操作按钮：左边标记、右边缩放。居中垂直排列。 */
 .lb-side {
   position: absolute; top: 50%; transform: translateY(-50%);

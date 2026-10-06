@@ -22,22 +22,23 @@ import (
 // gui / console 两种构建共用同一套启动流程，差别只在最后一步：
 // console 版阻塞在 srv.Serve 上，gui 版把 HTTP 服务丢到后台、主线程交给本地窗口。
 type appConfig struct {
-	root      string // 素材根目录（命令行 -root，或拖到图标上的那个文件夹）
-	addr      string // 监听地址，例如 :8080
-	dbPath    string // 审阅状态数据库
-	cacheDir  string // 转码缓存目录
-	token     string // 下载口令，空 = 随机生成
-	openDL    bool   // 关闭下载口令校验
-	vjobs     int    // 视频预热并发数
-	qcHW      string // QC 视频解码："cpu"=软解；"cuda"/"qsv"/"d3d11va"=只用那一条；"auto"=探测择优。对应 -qcdec
-	encHW     string // 视频转码编码："cpu"=libx264；"nvenc"/"qsv"/"amf"=只用那一个；"auto"=择优。对应 -enc
-	autoClose bool   // QC 全部完成后自动退出（硬件测试脚本用）
-	vres      int    // 视频转码规格（较小边封顶）
-	ires      int    // 图片预览规格（较小边封顶）
-	vkeep     bool   // 保留上一轮的转码产物
-	autoOpen  bool   // 启动后自动打开下载页
-	logFile   string // 日志文件路径
-	csvPath   string // 退出时把审阅标记导出的 CSV 路径（空 = 与数据库同目录 <库名>-review.csv）
+	root       string // 素材根目录（命令行 -root，或拖到图标上的那个文件夹）
+	addr       string // 监听地址，例如 :8080
+	dbPath     string // 审阅状态数据库
+	dbExplicit bool   // 是否由用户显式指定了 -db（指定后跨重启保留，启动/退出都不自动清库）
+	cacheDir   string // 转码缓存目录
+	token      string // 下载口令，空 = 随机生成
+	openDL     bool   // 关闭下载口令校验
+	vjobs      int    // 视频预热并发数
+	qcHW       string // QC 视频解码："cpu"=软解；"cuda"/"qsv"/"d3d11va"=只用那一条；"auto"=探测择优。对应 -qcdec
+	encHW      string // 视频转码编码："cpu"=libx264；"nvenc"/"qsv"/"amf"=只用那一个；"auto"=择优。对应 -enc
+	autoClose  bool   // QC 全部完成后自动退出（硬件测试脚本用）
+	vres       int    // 视频转码规格（较小边封顶）
+	ires       int    // 图片预览规格（较小边封顶）
+	vkeep      bool   // 保留上一轮的转码产物
+	autoOpen   bool   // 启动后自动打开下载页
+	logFile    string // 日志文件路径
+	csvPath    string // 退出时把审阅标记导出的 CSV 路径（空 = 与数据库同目录 <库名>-review.csv）
 }
 
 // app 一次运行起来的全部零件。
@@ -216,8 +217,11 @@ func (a *app) Close() {
 		exportReviewCSV(reviewCSVMakePath(a.cfg.dbPath, a.cfg.csvPath), a.db)
 		_ = a.db.Close()
 	}
-	// 退出即全清：连 medreview.db / -wal / -shm 一起删，下次启动重新建空库。
-	wipeDB(a.cfg.dbPath)
+	// 退出清库：默认的临时库（没显式写 -db）连 medreview.db / -wal / -shm 一起删；
+	// 显式指定了 -db 的不删，跨重启保留（审阅记录和历史批注名都在里面）。
+	if !a.cfg.dbExplicit {
+		wipeDB(a.cfg.dbPath)
+	}
 }
 
 // ---------------------------------------------------------------- 绑定端口与地址

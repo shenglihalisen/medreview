@@ -397,9 +397,21 @@ def main():
         print('=== I. 其它加固 ===')
         check('API_BASE 改为 file:/static-html 判定（修掉手机请求打到 127.0.0.1）',
               'location.protocol === "file:"' in js and 'static-html' in js)
-        check('localStorage 全部包在 try 里（否则 init 中断、所有按钮失效）',
-              all(('try {' in l and 'catch' in l) for l in js.splitlines() if 'localStorage.' in l),
-              ' | '.join(l.strip() for l in js.splitlines() if 'localStorage.' in l and 'try {' not in l)[:160])
+        # 逐行判 try/catch 不准：多行 try 块里 localStorage 在中间行，同行没有 try{/catch。
+        # 改成括号深度扫描：每条 localStorage 访问必须落在某个 try 块内
+        # （单行 try{..}catch，或 depth>0 的多行块），真实意图是"必须被守卫"。
+        _depth = 0
+        _bad = ''
+        for _l in js.splitlines():
+            _o = _l.count('try {') + _l.count('try{')
+            _c = len(re.findall(r'\} catch', _l))
+            if 'localStorage.' in _l:
+                _inline = ('try {' in _l or 'try{' in _l) and 'catch' in _l
+                if not (_inline or _depth > 0):
+                    _bad = _l.strip()
+                    break
+            _depth += _o - _c
+        check('localStorage 全部包在 try 里（否则 init 中断、所有按钮失效）', _bad == '', _bad[:160])
         check('前台返场重同步（visibilitychange / pageshow）',
               'visibilitychange' in js and 'pageshow' in js and 'function resync(' in js)
         check('图片一律走 /api/media 原图，不再请求缩略图',

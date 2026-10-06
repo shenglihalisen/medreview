@@ -40,6 +40,8 @@
     lbOverride: null,
     lbTitle: "",
     lbHideDirt: false, // 灯箱里隐藏 QC 问题框（H 键切换，偏好记住）
+    // 灯箱构图辅助线（6 种类型独立开关，可叠加；偏好记住，刷新保持）
+    lbGuides: { ruleOfThirds: false, goldenRatio: false, diagonal: false, centerCross: false, centerDot: false, goldenSpiral: false },
     page: 60,
     claimedBy: "",
     canDownload: false,
@@ -191,6 +193,13 @@
     // 画质偏好（压缩图 / 原图）
     try { S.quality = localStorage.getItem("mr_quality") === "orig" ? "orig" : "preview"; } catch (e) {}
     try { S.lbHideDirt = localStorage.getItem("mr_hidedirt") === "1"; } catch (e) {}
+    // 辅助线偏好：存成 JSON（各类型 on/off），读不到/坏数据就退回默认全关
+    try {
+      var gSaved = JSON.parse(localStorage.getItem("mr_guides") || "{}");
+      if (gSaved && typeof gSaved === "object") {
+        for (var gk in S.lbGuides) if (gSaved.hasOwnProperty(gk)) S.lbGuides[gk] = !!gSaved[gk];
+      }
+    } catch (e2) {}
 
     // 每次打开/刷新都必须重新登记批注名，且不能跳过：
     // 不读缓存、不写名字缓存（cookie 只作服务端兜底），刷新就一定重填。
@@ -203,6 +212,8 @@
 
       buildStaticUI();
       bindEvents();
+      setupGuides();
+      setupDirtToggle();
 
       loadStatus().then(function () {
         S.folderId = 1;
@@ -1072,6 +1083,228 @@
   // SSE 异步收到某张图的 QC 结果、且灯箱正好开在它上面时，重画脏点框。
   function updateLbDirt() { layoutDirt(); }
 
+  // ---------- 灯箱构图辅助线 ----------
+  // 与脏点框同机制：独立的覆盖层，复制图片的 transform（缩放/平移不漂移）。
+  // 坐标用图片实际显示矩形 0..W / 0..H 的像素值，天然适配任意尺寸与 zoom。
+  // 6 种类型各自一组线段/路径，可单选、可多选叠加；全部关掉即隐藏。
+  //
+  // ⚠️ 黄金螺旋是**固定形状**，不能像网格线那样直接用 W/H 拉伸（非黄金比画幅会被压变形）。
+  //    所以它固定生成在标准黄金矩形 STD_W×STD_H（比值精确=φ）里，再由 fitStdShape()
+  //    做「等比缩放 + 居中平移」适配任意画幅 —— 形状永不变形，且完整可见。
+  var STD_W = 1000, STD_H = 1000 / 1.6180339887;
+  // r(θ)=R0·e^(-bθ)，b=ln(φ)/(π/2) → 每 1/4 圈半径 ×1/φ。固定生成在**标准黄金矩形**里，
+  // 再把包围盒等比归一化进矩形，保证螺旋完整内接（不被裁切）、形状不变形。
+  // 横图用横标准 (STD_W×STD_H)，竖图用竖标准（交换两轴），铺满度更高（见 goldenSpiral.draw）。
+  function makeStdSpiral(SW, SH) {
+    var PHI = 1.6180339887, b = Math.log(PHI) / (Math.PI / 2);
+    var cx = SW * 0.382, cy = SH * 0.382;
+    var R0 = Math.hypot(SW - cx, SH - cy);
+    var th0 = Math.atan2(SH - cy, SW - cx);
+    var turns = 2.2, N = 360, pts = [];
+    for (var i = 0; i <= N; i++) {
+      var t = (i / N) * turns * 2 * Math.PI;
+      var r = R0 * Math.exp(-b * t), th = th0 + t;
+      pts.push([cx + r * Math.cos(th), cy + r * Math.sin(th)]);
+    }
+    var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity, k;
+    for (k = 0; k < pts.length; k++) {
+      if (pts[k][0] < minX) minX = pts[k][0];
+      if (pts[k][0] > maxX) maxX = pts[k][0];
+      if (pts[k][1] < minY) minY = pts[k][1];
+      if (pts[k][1] > maxY) maxY = pts[k][1];
+    }
+    var bw = maxX - minX, bh = maxY - minY;
+    var s = Math.min(SW / bw, SH / bh);
+    var ox = (SW - bw * s) / 2 - minX * s;
+    var oy = (SH - bh * s) / 2 - minY * s;
+    var d = "";
+    for (k = 0; k < pts.length; k++) d += (k ? "L" : "M") + (pts[k][0] * s + ox).toFixed(1) + " " + (pts[k][1] * s + oy).toFixed(1) + " ";
+    return d;
+  }
+  var STD_SPIRAL   = makeStdSpiral(STD_W, STD_H);   // 横图用（包围盒 [0,STD_W]×[0,STD_H]）
+  var STD_SPIRAL_V = makeStdSpiral(STD_H, STD_W);   // 竖图用（包围盒 [0,STD_H]×[0,STD_W]）
+  var GUIDES = [
+    { key: "ruleOfThirds", name: "九宫格", draw: function (s, W, H) {
+        line(s, W / 3, 0, W / 3, H); line(s, 2 * W / 3, 0, 2 * W / 3, H);
+        line(s, 0, H / 3, W, H / 3); line(s, 0, 2 * H / 3, W, 2 * H / 3);
+      } },
+    { key: "goldenRatio", name: "黄金分割", draw: function (s, W, H) {
+        var a = W * 0.382, b = W * 0.618, c = H * 0.382, d = H * 0.618;
+        line(s, a, 0, a, H); line(s, b, 0, b, H);
+        line(s, 0, c, W, c); line(s, 0, d, W, d);
+      } },
+    { key: "diagonal", name: "对角交叉线", draw: function (s, W, H) {
+        line(s, 0, 0, W, H); line(s, W, 0, 0, H);
+      } },
+    { key: "centerCross", name: "中心十字", draw: function (s, W, H) {
+        line(s, W / 2, 0, W / 2, H); line(s, 0, H / 2, W, H / 2);
+      } },
+    { key: "centerDot", name: "中心点", draw: function (s, W, H) {
+        var cx = W / 2, cy = H / 2, r = Math.max(6, Math.min(W, H) * 0.02);
+        svgEl(s, "circle", { cx: cx, cy: cy, r: r });
+        line(s, cx - r * 2, cy, cx + r * 2, cy);
+        line(s, cx, cy - r * 2, cx, cy + r * 2);
+      } },
+    { key: "goldenSpiral", name: "黄金螺旋", draw: function (s, W, H) {
+        // 固定形状 → 等比缩放居中适配，绝不跟着画幅拉伸（见上方 makeStdSpiral 注释）。
+        // 按画幅方向选横/竖标准，铺满度更高（横图用横标准、竖图用竖标准），形状仍不变形。
+        var useV = H > W;
+        var SW = useV ? STD_H : STD_W, SH = useV ? STD_W : STD_H;
+        var sp = useV ? STD_SPIRAL_V : STD_SPIRAL;
+        var fitS = Math.min(W / SW, H / SH);
+        var ox = (W - SW * fitS) / 2, oy = (H - SH * fitS) / 2;
+        var g = svgEl(s, "g", {
+          transform: "translate(" + ox.toFixed(2) + "," + oy.toFixed(2) + ") scale(" + fitS.toFixed(5) + ")"
+        });
+        svgEl(g, "path", { d: sp });
+      } },
+  ];
+
+  function svgEl(parent, tag, attrs) {
+    var e = document.createElementNS("http://www.w3.org/2000/svg", tag);
+    for (var k in attrs) if (attrs.hasOwnProperty(k)) e.setAttribute(k, attrs[k]);
+    parent.appendChild(e);
+    return e;
+  }
+  function line(parent, x1, y1, x2, y2) { svgEl(parent, "line", { x1: x1, y1: y1, x2: x2, y2: y2 }); }
+
+  // 把辅助线摆到图片实际显示矩形上（与 layoutDirt 同理，按 img 偏移量定位 SVG）。
+  function layoutGuides() {
+    var layer = el.lbBody.querySelector(".lb-guides-layer");
+    if (!layer) return;
+    var img = el.lbBody.querySelector("img");
+    var anyOn = GUIDES.some(function (g) { return S.lbGuides[g.key]; });
+    if (!img || !img.offsetWidth || !anyOn) { layer.style.display = "none"; return; }
+    layer.style.display = "block";
+    var L = img.offsetLeft, T = img.offsetTop, W = img.offsetWidth, H = img.offsetHeight;
+    var svg = layer.querySelector("svg");
+    if (!svg) {
+      svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("preserveAspectRatio", "none");
+      layer.appendChild(svg);
+    }
+    svg.style.position = "absolute";
+    svg.style.left = L + "px"; svg.style.top = T + "px";
+    svg.style.width = W + "px"; svg.style.height = H + "px";
+    svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    GUIDES.forEach(function (g) { if (S.lbGuides[g.key]) g.draw(svg, W, H); });
+    syncGuidesTransform();
+  }
+
+  // 辅助线覆盖层随图片缩放/平移：把图片的 transform 原样复制给覆盖层。
+  function syncGuidesTransform() {
+    var layer = el.lbBody.querySelector(".lb-guides-layer");
+    if (!layer) return;
+    var m = lbMedia();
+    layer.style.transform = m ? m.style.transform : "";
+  }
+
+  function persistGuides() {
+    try { localStorage.setItem("mr_guides", JSON.stringify(S.lbGuides)); } catch (e) {}
+  }
+
+  function updateGuidesBtn() {
+    if (!el.lbGuidesBtn) return;
+    var on = GUIDES.some(function (g) { return S.lbGuides[g.key]; });
+    el.lbGuidesBtn.classList.toggle("on", on);
+    el.lbGuidesBtn.textContent = on ? "辅助线 ●" : "辅助线";
+  }
+
+  function setGuide(key, on) {
+    S.lbGuides[key] = !!on;
+    persistGuides();
+    updateGuidesBtn();
+    if (el.lbGuidesPanel && el.lbGuidesPanel.style.display !== "none") {
+      var cb = el.lbGuidesPanel.querySelector('input[data-key="' + key + '"]');
+      if (cb) cb.checked = !!on;
+    }
+    layoutGuides();
+  }
+
+  // 展开/收起辅助线清单面板；force 省略时取反当前状态。
+  function toggleGuidesPanel(force) {
+    var panel = el.lbGuidesPanel;
+    if (!panel) return;
+    var show = (force === undefined) ? (panel.style.display === "none") : force;
+    panel.style.display = show ? "block" : "none";
+    if (show) {
+      panel.querySelectorAll("input[type=checkbox]").forEach(function (cb) {
+        cb.checked = !!S.lbGuides[cb.dataset.key];
+      });
+    }
+    if (el.lbGuidesBtn) el.lbGuidesBtn.classList.toggle("open", show);
+  }
+
+  // 在灯箱工具栏加「辅助线」按钮 + 可叠加的清单面板（纯 JS 注入，HTML 无需改动）。
+  function setupGuides() {
+    var top = el.lightbox.querySelector(".lb-top");
+    if (!top || el.lbGuidesBtn) return; // 幂等
+    var btn = document.createElement("button");
+    btn.id = "lb-guides";
+    btn.textContent = "辅助线";
+    btn.title = "构图辅助线（G 展开；面板展开时按 1–6 逐个开关，可叠加）";
+    btn.onclick = function (e) { e.stopPropagation(); toggleGuidesPanel(); };
+    top.appendChild(btn);
+    el.lbGuidesBtn = btn;
+
+    var panel = document.createElement("div");
+    panel.id = "lb-guides-panel";
+    panel.className = "lb-guides-panel";
+    panel.style.display = "none";
+    GUIDES.forEach(function (g, i) {
+      var row = document.createElement("label");
+      row.className = "lb-guides-row";
+      var cb = document.createElement("input");
+      cb.type = "checkbox"; cb.dataset.key = g.key; cb.checked = !!S.lbGuides[g.key];
+      cb.onchange = function () { setGuide(g.key, cb.checked); };
+      var num = document.createElement("span"); num.className = "lb-guides-num"; num.textContent = (i + 1);
+      var nm = document.createElement("span"); nm.textContent = g.name;
+      row.appendChild(num); row.appendChild(cb); row.appendChild(nm);
+      panel.appendChild(row);
+    });
+    el.lightbox.appendChild(panel);
+    el.lbGuidesPanel = panel;
+
+    // 点面板/按钮以外的地方自动收起
+    document.addEventListener("click", function (e) {
+      if (panel.style.display === "none") return;
+      if (panel.contains(e.target)) return;
+      if (el.lbGuidesBtn && el.lbGuidesBtn.contains(e.target)) return;
+      toggleGuidesPanel(false);
+    }, true);
+
+    updateGuidesBtn();
+  }
+
+  // 灯箱工具栏「问题框」按钮：与 H 键同步，显示/隐藏 QC 镜头脏污红框。
+  function setupDirtToggle() {
+    var top = el.lightbox.querySelector(".lb-top");
+    if (!top || el.lbDirtBtn) return; // 幂等
+    var btn = document.createElement("button");
+    btn.id = "lb-dirt";
+    btn.title = "显示/隐藏 QC 镜头脏污问题框（快捷键 H）";
+    btn.onclick = function (e) { e.stopPropagation(); toggleDirt(); };
+    top.appendChild(btn);
+    el.lbDirtBtn = btn;
+    updateDirtBtn();
+  }
+
+  function toggleDirt() {
+    S.lbHideDirt = !S.lbHideDirt;
+    try { localStorage.setItem("mr_hidedirt", S.lbHideDirt ? "1" : "0"); } catch (e2) {}
+    layoutDirt();
+    updateDirtBtn();
+    toast(S.lbHideDirt ? "问题框已隐藏（按 H 恢复）" : "问题框已显示");
+  }
+
+  function updateDirtBtn() {
+    if (!el.lbDirtBtn) return;
+    var shown = !S.lbHideDirt; // on = 红框可见
+    el.lbDirtBtn.classList.toggle("on", shown);
+    el.lbDirtBtn.textContent = shown ? "问题框 ●" : "问题框";
+  }
+
   function applyZoom() {
     var m = lbMedia();
     if (!m) return;
@@ -1080,6 +1313,7 @@
     clampPan();
     m.style.transform = "translate(" + Z.tx + "px," + Z.ty + "px) scale(" + s + ")";
     syncDirtTransform();   // 脏点框跟着图片一起缩放/平移
+    syncGuidesTransform(); // 辅助线同理
     updateZoomButtons();
   }
 
@@ -1161,6 +1395,7 @@
     resetZoom();   // 每次切图都会重建 img，缩放必须重置
     el.lbName.textContent = (S.lbTitle ? S.lbTitle + "  ·  " : "") + f.name + "  (" + fmtSize(f.size) + ")";
     el.lbBody.innerHTML = "";
+    if (el.lbGuidesPanel) toggleGuidesPanel(false); // 关灯箱顺手收起辅助线面板
     // 灯箱里的 QC 徽标条：网格卡片太小看不清，放大图时问题类型要跟着文件走。
     // ⚠️ 挂载点必须是 .lb-top 的**兄弟**（lb-body 之前），不能塞进 .lb-top ——
     // 那是横排 flex（文件名 flex:1 + 关闭按钮），塞进去徽标条会被压扁、布局挤坏。
@@ -1181,8 +1416,8 @@
     if (f.kind === 1) {
       // 图片**直接**挂到定高的 .lb-body 下（不能包一层，原因见 lbMedia 的注释）
       var img = document.createElement("img");
-      // 脏点框要按图片实际显示矩形定位，得等尺寸出来；setImg 的回调是失败回调，不是 load
-      img.onload = function () { layoutDirt(); };
+      // 脏点框 / 辅助线要按图片实际显示矩形定位，得等尺寸出来；setImg 的回调是失败回调，不是 load
+      img.onload = function () { layoutDirt(); layoutGuides(); };
       setImg(img, mediaURL(f, S.lbOrig), function () {});
       el.lbBody.appendChild(img);
       // 脏点覆盖层：铺满 .lb-body 的兄弟层，框按像素摆到图片矩形上
@@ -1190,6 +1425,11 @@
       layer.className = "lb-dirt-layer";
       layer.style.display = "none";
       el.lbBody.appendChild(layer);
+      // 构图辅助线覆盖层：与脏点框同机制（复制图片 transform）
+      var glayer = document.createElement("div");
+      glayer.className = "lb-guides-layer";
+      glayer.style.display = "none";
+      el.lbBody.appendChild(glayer);
     } else {
       var box = document.createElement("div");
       box.style.cssText = "height:100%;display:flex;align-items:center;justify-content:center;" +
@@ -1235,6 +1475,7 @@
     updateOrigBtn();
     updateLbButtons();
     updateZoomButtons();
+    layoutGuides(); // 处理已缓存（同步完成）的图片；未就绪的等 img.onload 再画
   }
 
   // 「看原图」按钮：只有图片有；文案随状态切换。预览版默认，点一下临时换原图。
@@ -1498,6 +1739,13 @@
         if (e.key === "Escape") { closeLightbox(); return; }
         if (e.key === "ArrowLeft") { lbStep(-1); return; }
         if (e.key === "ArrowRight") { lbStep(1); return; }
+        // 辅助线面板展开时，数字 1–6 切换各辅助线（与下方标记键 1/2/0 互斥，避免冲突）
+        if (el.lbGuidesPanel && el.lbGuidesPanel.style.display !== "none" && e.key >= "1" && e.key <= "6") {
+          var gi = parseInt(e.key, 10) - 1;
+          if (GUIDES[gi]) setGuide(GUIDES[gi].key, !S.lbGuides[GUIDES[gi].key]);
+          e.preventDefault();
+          return;
+        }
         // 1/2/0 都算「处理完这一张」，翻页交给 lbDecide 在标记成功后自己做
         if (e.key === "1") { lbDecide(1); return; }
         if (e.key === "2") { lbDecide(2); return; }
@@ -1507,7 +1755,14 @@
           S.lbHideDirt = !S.lbHideDirt;
           try { localStorage.setItem("mr_hidedirt", S.lbHideDirt ? "1" : "0"); } catch (e2) {}
           layoutDirt();
+          updateDirtBtn(); // 同步工具栏按钮状态
           toast(S.lbHideDirt ? "问题框已隐藏（按 H 恢复）" : "问题框已显示");
+          return;
+        }
+        if (e.key === "g" || e.key === "G") {
+          // 展开/收起辅助线清单面板；面板内按 1–6 切各类型
+          e.preventDefault();
+          toggleGuidesPanel();
           return;
         }
         if (e.key === "+" || e.key === "=") { zoomBy(1.5); return; }
@@ -1989,6 +2244,7 @@
       "<p><b>清空本目录</b>：「清空本目录标记」作用于<b>这一个目录（不含子目录）</b>里的全部文件，保留 / 不保留 / 不确定都会被抹掉，<b>无法撤销</b>；确认弹窗里会写明本层有多少个已被标记、其中几个是别人标的。它和上面那个「清除本页标记」不是一回事 —— 后者只动屏幕上看得见的那几张。</p>" +
       "<p><b>含父目录</b>：默认打开 —— 进一个子目录时，会把<b>上一层目录直属的</b>照片也一起列出来（卡片左上角有绿色「父目录」角标），省得来回切。点工具栏那个按钮可以关掉，只看本目录。这只是<b>浏览范围</b>：标记、打包、导出的口径完全不变。</p>" +
       "<p><b>问题框</b>：灯箱里 QC 检出「镜头脏污」时会在画面上画红框。嫌挡视线就按 <b>H</b> 隐藏，再按恢复 —— 偏好会被记住，卡片右上角的徽标不受影响。</p>" +
+      "<p><b>辅助线</b>：灯箱里点工具栏「辅助线」或按 <b>G</b> 展开清单，可勾选 九宫格 / 黄金分割 / 对角交叉线 / 中心十字 / 中心点 / 黄金螺旋，<b>任意叠加</b>（全不勾就关掉）。展开面板后按 <b>1</b>–<b>6</b> 逐个开关（与标记键 1/2/0 互斥，合上面板时 1/2/0 仍用于标记）；开关状态会被记住。辅助线不拦截鼠标，随缩放/平移同步、不漂移，原图与压缩图都显示。</p>" +
       "<p><b>下载口径</b>：打包 ZIP、导出路径清单、导出到本机目录、以及单文件下载，<b>都只给标记为「保留」的文件</b>。「不保留」和「没标过 / 不确定」的拿不到。</p>" +
       "<p><b>素材被覆盖过就要重标</b>：同一个位置换了文件（大小或修改时间变了），原来那条「保留」会自动作废，避免把没看过的内容打进交付包。</p>" +
       "<p><b>名字</b>：每次打开页面都要登记批注名，不能跳过；同一个页面里不能改名，想换名字刷新即可。名字只用于区分多人，服务关闭后失效。</p>" +
