@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // ImageService 给大图生成一份低清晰度的 JPEG 预览并缓存，让审阅页加载得快。
@@ -48,6 +49,8 @@ type ImageService struct {
 	ffmpeg    string
 
 	keyLocks sync.Map // cache key -> *sync.Mutex，同一张图的并发请求只转一次
+
+	tmpSeq uint64 // 转码临时文件全局唯一序号，避免并发/重试复用同名 .part 互相踩
 
 	warmMu     sync.Mutex
 	warmCancel context.CancelFunc // 换目录时取消上一轮预热
@@ -222,31 +225,127 @@ func (s *ImageService) warm(folderIDs []int64) {
 
 // transcode 把 src 缩放后写成 out（JPEG q≈85）。known=true 时用精确目标尺寸；
 // false 时用 fit-in-box 过滤器（配合 min() 防止小图被放大）。
+//
+// 健壮性设计（消除「间歇性环境干扰」）：
+//  1. **ffmpeg 运行期**偶发被外部环境（杀软实时扫描 / 沙箱写限制）以
+//     "Permission denied"（EACCES）拒绝写 .part。这是瞬时干扰、不是真错误，
+//     仅对「权限被拒」类错误重试（源损坏 / 参数错等真错误立即返回，不重试）。
+//  2. **rename 落盘期**偶发报 "The system cannot find the file specified"——
+//     杀软在那一瞬锁住刚写好的 .part，导致 rename 看不到源。改用 moveFileWithRetry：
+//     多次重试 rename，仍失败则退化为 copy+remove 兜底，彻底消掉这条抖动。
+//  3. **临时名全局唯一**（s.tmpSeq 原子自增）：不同图片、同一图片的不同重试批次
+//     永远不共用文件名，避免并发/重试时同名 .part 互相踩、互相锁。
 func (s *ImageService) transcode(ctx context.Context, src, out string, w, h int, known bool) error {
 	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
 		return err
 	}
-	tmp := out + ".part"
-	args := []string{"-y", "-v", "error", "-i", src}
+	baseArgs := []string{"-y", "-v", "error", "-i", src}
 	if known {
-		args = append(args, "-vf", fmt.Sprintf("scale=%d:%d", w, h))
+		baseArgs = append(baseArgs, "-vf", fmt.Sprintf("scale=%d:%d", w, h))
 	} else {
-		args = append(args, "-vf",
+		baseArgs = append(baseArgs, "-vf",
 			fmt.Sprintf("scale=w='min(iw,%d)':h='min(ih,%d)':force_original_aspect_ratio=decrease", s.shortSide, s.shortSide))
 	}
-	args = append(args, "-frames:v", "1", "-q:v", "3", "-f", "image2", tmp)
-	cmd := exec.CommandContext(ctx, s.ffmpeg, args...)
-	var errBuf bytes.Buffer
-	cmd.Stderr = &errBuf
-	if err := cmd.Run(); err != nil {
-		os.Remove(tmp)
-		return fmt.Errorf("ffmpeg: %v: %s", err, strings.TrimSpace(errBuf.String()))
+
+	// 跑一次 ffmpeg，仅对「瞬时权限被拒」重试。成功返回产物在 tmp（由调用方负责清理）。
+	runFFmpeg := func(tmp string) error {
+		const runAttempts = 3
+		var lastErr error
+		for r := 0; r < runAttempts; r++ {
+			_ = os.Remove(tmp) // 跑前清掉任何残留，保证从干净状态开始
+			cmdArgs := append(baseArgs, "-frames:v", "1", "-q:v", "3", "-f", "image2", tmp)
+			cmd := exec.CommandContext(ctx, s.ffmpeg, cmdArgs...)
+			var errBuf bytes.Buffer
+			cmd.Stderr = &errBuf
+			if err := cmd.Run(); err != nil {
+				lastErr = fmt.Errorf("ffmpeg: %v: %s", err, strings.TrimSpace(errBuf.String()))
+				msg := strings.ToLower(errBuf.String())
+				if strings.Contains(msg, "permission denied") || strings.Contains(msg, "denied") {
+					if r+1 < runAttempts {
+						log.Printf("图片预览: 转码被环境瞬时拒绝（Permission denied），第 %d 次重试", r+1)
+						time.Sleep(time.Duration(r+1) * 250 * time.Millisecond)
+						continue
+					}
+				}
+				return lastErr
+			}
+			return nil
+		}
+		return lastErr
 	}
-	if err := os.Rename(tmp, out); err != nil {
-		os.Remove(tmp)
+
+	const maxAttempts = 2 // 落盘兜底后再整体重试一次（用全新临时名）
+	var lastErr error
+	var tmps []string
+	defer func() {
+		for _, t := range tmps {
+			_ = os.Remove(t)
+		}
+	}()
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		tmp := fmt.Sprintf("%s.part.%d", out, atomic.AddUint64(&s.tmpSeq, 1))
+		tmps = append(tmps, tmp)
+		if err := runFFmpeg(tmp); err != nil {
+			lastErr = err
+			return lastErr // ffmpeg 真错误（或权限拒绝重试耗尽）直接返回，不重试
+		}
+		if err := moveFileWithRetry(tmp, out); err != nil {
+			lastErr = err
+			if attempt+1 < maxAttempts {
+				log.Printf("图片预览: 转码产物落盘失败（%v），换新临时名重试", err)
+				time.Sleep(time.Duration(attempt+1) * 200 * time.Millisecond)
+				continue
+			}
+			return lastErr
+		}
+		return nil
+	}
+	return lastErr
+}
+
+// moveFileWithRetry 把 src 原子落盘到 dst，专门消化「rename 偶发找不到源」的瞬时抖动：
+//   - 先尝试 os.Rename，失败就短间隔重试几次（杀软锁通常几百 ms 内释放）；
+//   - 重试前确认 src 还在（确认真的丢了再放弃，而不是盲目重试）；
+//   - 仍失败退化为 copyFile + remove 兜底（跨分区 / 权限特殊的场景也能落盘）。
+func moveFileWithRetry(src, dst string) error {
+	const maxRename = 4
+	var lastErr error
+	for i := 0; i < maxRename; i++ {
+		if err := os.Rename(src, dst); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		// 源还在就值得再试；源真没了说明写入失败，别空转
+		if _, serr := os.Stat(src); serr != nil {
+			return serr
+		}
+		time.Sleep(time.Duration(i+1) * 200 * time.Millisecond)
+	}
+	// 兜底：拷贝代替 rename（慢一点但稳）
+	if err := copyImageFile(src, dst); err != nil {
+		return fmt.Errorf("rename 失败(%v) 且 copy 兜底也失败: %w", lastErr, err)
+	}
+	_ = os.Remove(src)
+	return nil
+}
+
+// copyImageFile 逐字节拷贝并保留目标为临时写入完成后的成品（覆盖写）。
+func copyImageFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
 		return err
 	}
-	return nil
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+	return out.Sync()
 }
 
 // PrepareCache 处理上一轮留下的图片预览缓存。
