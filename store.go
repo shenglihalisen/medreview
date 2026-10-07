@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -1001,3 +1002,98 @@ func (s *Store) HasQC(fileID, size, mtime int64) (bool, error) {
 	}
 	return ver == qc.QCVersion && sz == size && mt == mtime, nil
 }
+
+// MarkProcessed 标记某个媒体已生成可浏览预览/转码产物（仪表盘「已处理」用）。
+// WHERE processed=0 保证只写一次、幂等，重复调用零副作用。
+func (s *Store) MarkProcessed(fileID int64) error {
+	_, err := s.db.Exec(`UPDATE file SET processed=1 WHERE id=? AND processed=0`, fileID)
+	return err
+}
+
+// Worker 表示当前在岗的审阅员。Claiming 为其认领的目录名（未认领则为空串）。
+type Worker struct {
+	Name     string `json:"name"`
+	Claiming string `json:"claiming"`
+}
+
+// ActiveWorkers 返回「正在干活」的人：当前认领了目录的人，加上近 cutoffMs 毫秒内
+// 有过动作（known_user.last_used 被刷新）的人，两者取并集、按名字去重。
+func (s *Store) ActiveWorkers(cutoffMs int64) ([]Worker, error) {
+	merged := map[string]*Worker{}
+	add := func(name, claiming string) {
+		if name == "" || name == "匿名" {
+			return
+		}
+		if w, ok := merged[name]; ok {
+			if claiming != "" && w.Claiming == "" {
+				w.Claiming = claiming
+			}
+			return
+		}
+		merged[name] = &Worker{Name: name, Claiming: claiming}
+	}
+
+	rows, err := s.db.Query(`SELECT c.user_name, f.name FROM claim c JOIN folder f ON f.id=c.folder_id`)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var u, fn string
+		if err := rows.Scan(&u, &fn); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		add(u, fn)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	krows, err := s.db.Query(`SELECT name FROM known_user WHERE last_used >= ?`, cutoffMs)
+	if err != nil {
+		return nil, err
+	}
+	for krows.Next() {
+		var u string
+		if err := krows.Scan(&u); err != nil {
+			krows.Close()
+			return nil, err
+		}
+		add(u, "")
+	}
+	krows.Close()
+	if err := krows.Err(); err != nil {
+		return nil, err
+	}
+
+	out := make([]Worker, 0, len(merged))
+	for _, w := range merged {
+		out = append(out, *w)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+// QCStatsAll 全局质量标记汇总（不限目录），给仪表盘用。Total 为有 QC 记录的文件数。
+func (s *Store) QCStatsAll() (QCStat, error) {
+	var st QCStat
+	err := s.db.QueryRow(`
+		SELECT COUNT(*),
+			COALESCE(SUM(CASE WHEN (qc.flags & ?)>0 THEN 1 ELSE 0 END),0),
+			COALESCE(SUM(CASE WHEN (qc.flags & ?)>0 THEN 1 ELSE 0 END),0),
+			COALESCE(SUM(CASE WHEN (qc.flags & ?)>0 THEN 1 ELSE 0 END),0),
+			COALESCE(SUM(CASE WHEN (qc.flags & ?)>0 THEN 1 ELSE 0 END),0),
+			COALESCE(SUM(CASE WHEN (qc.flags & ?)>0 THEN 1 ELSE 0 END),0),
+			COALESCE(SUM(CASE WHEN (qc.flags & ?)>0 THEN 1 ELSE 0 END),0),
+			COALESCE(SUM(CASE WHEN (qc.flags & ?)>0 THEN 1 ELSE 0 END),0),
+			COALESCE(SUM(CASE WHEN (qc.flags & ?)>0 THEN 1 ELSE 0 END),0)
+		FROM file f JOIN qc ON qc.file_id = f.id
+		WHERE f.present=1`,
+		qc.FlagDup, qc.FlagCorrupted, qc.FlagBlank, qc.FlagLensDirt,
+		qc.FlagBlur, qc.FlagExposure, qc.FlagNoise, qc.FlagShake).
+		Scan(&st.Total, &st.Dup, &st.Corrupt, &st.Blank, &st.Dirt,
+			&st.Blur, &st.Exposure, &st.Noise, &st.Shake)
+	return st, err
+}
+

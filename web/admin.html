@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>素材审阅 · 管理仪表盘</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/style.css">
+<style>
+/* 仪表盘布局：沿用 review.html 的配色变量（来自 style.css 的 :root），这里只定义排布。
+   注意：所有 class 统一加 d 前缀，避免与 style.css 里已有的 .card/.bar/.on 等规则冲突
+   （那些是审阅画廊卡片的样式，会用到 position:absolute，套到仪表盘上就会把元素叠在一起）。 */
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 "Microsoft YaHei", "PingFang SC", "Segoe UI", system-ui, sans-serif;
+}
+#app { max-width: 1120px; margin: 0 auto; padding: 20px 20px 48px; }
+
+.dhead {
+  display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  padding: 4px 2px 16px;
+}
+.dhead h1 { font-size: 20px; margin: 0; font-weight: 700; letter-spacing: .5px; }
+.dhead .dsub { color: var(--text-faint); font-size: 12.5px; }
+.dhead .dspacer { flex: 1; }
+.dhead .ddot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-faint); display: inline-block; margin-right: 6px; vertical-align: middle; }
+.dhead .ddot.ok { background: var(--keep); }
+.dhead .ddot.err { background: var(--reject); }
+
+.dsection { margin-top: 22px; }
+.dsection > .dtitle {
+  font-size: 13px; font-weight: 600; color: var(--text-dim);
+  margin: 0 2px 10px; display: flex; align-items: center; gap: 8px;
+}
+.dsection > .dtitle::before {
+  content: ""; width: 3px; height: 13px; border-radius: 2px; background: var(--primary); display: inline-block;
+}
+
+.dgrid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+.dcard {
+  background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 14px 16px; min-height: 84px; display: flex; flex-direction: column; justify-content: center;
+}
+.dcard .dlabel { font-size: 12.5px; color: var(--text-dim); }
+.dcard .dnum { font-size: 30px; font-weight: 700; line-height: 1.15; margin-top: 4px; }
+.dcard .dnote { font-size: 11.5px; color: var(--text-faint); margin-top: 2px; }
+.dcard.daccent .dnum { color: var(--primary); }
+.dcard.dkeep .dnum { color: var(--keep); }
+.dcard.dreject .dnum { color: var(--reject); }
+.dcard.dwarn .dnum { color: var(--warn); }
+
+.dbar { height: 6px; border-radius: 4px; background: #eef0f3; overflow: hidden; margin-top: 10px; }
+.dbar > span { display: block; height: 100%; background: var(--primary); transition: width .4s ease; }
+.dbar.dkeep > span { background: var(--keep); }
+
+.dchips { display: flex; flex-wrap: wrap; gap: 8px; }
+.dchip {
+  font-size: 12.5px; font-weight: 600; padding: 5px 11px; border-radius: 999px;
+  color: #1a1a1a; background: #eceef1;
+}
+.dchip.dzero { opacity: .42; }
+.dchip.ddup { background: #ffd54a; }
+.dchip.dcorrupt { background: #ff9d3a; }
+.dchip.dblank { background: #ffe08a; }
+.dchip.ddirt { background: #ff5a5a; color: #fff; }
+.dchip.dblur { background: #b98cff; }
+.dchip.dexposure { background: #4fd1e0; }
+.dchip.dnoise { background: #9aa0b5; color: #fff; }
+.dchip.dshake { background: #7fe3a8; }
+
+.dworkers { display: flex; flex-direction: column; gap: 8px; }
+.dworker {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 9px 14px;
+}
+.dworker .davatar {
+  width: 30px; height: 30px; border-radius: 50%; background: var(--primary-soft); color: var(--primary);
+  display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 13px; flex-shrink: 0;
+}
+.dworker .dnm { font-weight: 600; }
+.dworker .don { color: var(--text-faint); font-size: 12.5px; }
+.dworker .don b { color: var(--warn); font-weight: 600; }
+.dempty { color: var(--text-faint); font-size: 13px; padding: 8px 2px; }
+
+.dbanner {
+  background: var(--warn-soft); color: var(--warn); border: 1px solid #f0dcb8;
+  border-radius: var(--radius); padding: 9px 14px; font-size: 13px; margin: 2px 2px 0;
+}
+.dbanner.ok { background: var(--keep-soft); color: var(--keep); border-color: #b9e3c9; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="dhead">
+    <h1>管理仪表盘</h1>
+    <span class="dsub">素材审阅 · 实时态势</span>
+    <span class="dspacer"></span>
+    <span class="dsub"><span class="ddot" id="dot"></span><span id="updated">连接中…</span></span>
+  </div>
+
+  <div id="banner" class="dbanner" style="display:none"></div>
+
+  <div class="dsection">
+    <div class="dtitle">总览</div>
+    <div class="dgrid" id="overview"></div>
+  </div>
+
+  <div class="dsection">
+    <div class="dtitle">媒体构成</div>
+    <div class="dgrid" id="media"></div>
+  </div>
+
+  <div class="dsection">
+    <div class="dtitle">目录认领</div>
+    <div class="dgrid" id="folders"></div>
+  </div>
+
+  <div class="dsection">
+    <div class="dtitle">在岗人员</div>
+    <div class="dworkers" id="workers"></div>
+  </div>
+
+  <div class="dsection">
+    <div class="dtitle">质量概况（自动检测）</div>
+    <div class="dchips" id="qc"></div>
+  </div>
+</div>
+
+<script>
+// 数据刷新改为事件流驱动（见底部 connectEvents），不再固定轮询。
+const $ = (id) => document.getElementById(id);
+
+function card(label, num, opts) {
+  opts = opts || {};
+  const cls = ["dcard"];
+  if (opts.cls) cls.push(opts.cls);
+  let html = `<div class="${cls.join(' ')}">`;
+  html += `<div class="dlabel">${label}</div>`;
+  html += `<div class="dnum">${fmt(num)}</div>`;
+  if (opts.note) html += `<div class="dnote">${opts.note}</div>`;
+  if (opts.bar !== undefined) {
+    const pct = opts.barTotal > 0 ? Math.round(opts.bar / opts.barTotal * 100) : 0;
+    html += `<div class="dbar ${opts.barCls || ''}"><span style="width:${pct}%"></span></div>`;
+    html += `<div class="dnote">${pct}%</div>`;
+  }
+  html += `</div>`;
+  return html;
+}
+
+function fmt(n) { return (n == null ? 0 : n).toLocaleString('zh-CN'); }
+
+function renderOverview(t) {
+  const html = [
+    card("总文件", t.files, { cls: "daccent" }),
+    card("已审阅", t.files - t.pending, { cls: "dkeep", note: "保留 " + fmt(t.keep) + " · 不保留 " + fmt(t.reject) }),
+    card("未审阅", t.pending, { cls: "dwarn" }),
+    card("保留", t.keep, { cls: "dkeep" }),
+    card("不保留", t.reject, { cls: "dreject" }),
+  ];
+  $("overview").innerHTML = html.join("");
+}
+
+function renderMedia(m) {
+  const html = [
+    card("照片", m.photo, {}),
+    card("视频", m.video, {}),
+    card("待处理媒体", m.processedPending, { cls: "dwarn", note: "尚未生成可浏览预览",
+      bar: m.processedDone, barTotal: m.processedDone + m.processedPending }),
+    card("已处理媒体", m.processedDone, { cls: "dkeep", note: "已生成预览/转码",
+      bar: m.processedDone, barTotal: m.processedDone + m.processedPending, barCls: "dkeep" }),
+  ];
+  $("media").innerHTML = html.join("");
+}
+
+function renderFolders(f) {
+  const html = [
+    card("目录总数", f.total, { cls: "daccent" }),
+    card("已认领", f.claimed, { cls: "dkeep",
+      bar: f.claimed, barTotal: f.total }),
+    card("未认领", f.unclaimed, { cls: "dwarn",
+      bar: f.unclaimed, barTotal: f.total }),
+  ];
+  $("folders").innerHTML = html.join("");
+}
+
+function renderWorkers(w) {
+  const box = $("workers");
+  if (!w.list || w.list.length === 0) {
+    box.innerHTML = `<div class="dempty">当前没有人在岗（无认领、近 5 分钟也无审阅动作）</div>`;
+    return;
+  }
+  let html = `<div class="dempty" style="padding:0 2px 2px">共 ${w.count} 人在岗</div>`;
+  for (const u of w.list) {
+    const initial = (u.name || "?").slice(0, 1);
+    const on = u.claiming ? `正在审：<b>${escapeHtml(u.claiming)}</b>` : "浏览中";
+    html += `<div class="dworker">
+      <div class="davatar">${escapeHtml(initial)}</div>
+      <div class="dnm">${escapeHtml(u.name)}</div>
+      <div class="don">${on}</div>
+    </div>`;
+  }
+  box.innerHTML = html;
+}
+
+const QC_DEFS = [
+  ["dup", "重复"], ["corrupt", "损坏"], ["blank", "空镜"], ["dirt", "镜头脏污"],
+  ["blur", "模糊"], ["exposure", "曝光异常"], ["noise", "噪点"], ["shake", "抖动"],
+];
+function renderQC(qc) {
+  const box = $("qc");
+  if (!qc || !qc.total) { box.innerHTML = `<div class="dempty">尚无质量检测记录</div>`; return; }
+  let html = `<span class="dchip">已检测 ${fmt(qc.total)} 个</span>`;
+  for (const [key, label] of QC_DEFS) {
+    const n = qc[key] || 0;
+    html += `<span class="dchip d${key}${n === 0 ? ' dzero' : ''}">${label} ${fmt(n)}</span>`;
+  }
+  box.innerHTML = html;
+}
+
+function renderScan(scan) {
+  const b = $("banner");
+  if (scan && scan.running) {
+    const pct = scan.total > 0 ? Math.round(scan.done / scan.total * 100) : 0;
+    b.style.display = "block";
+    b.className = "dbanner";
+    b.textContent = `扫描进行中：${fmt(scan.done)} / ${fmt(scan.total)}（${pct}%）`;
+  } else if (scan && scan.endedAt && scan.total > 0) {
+    b.style.display = "block";
+    b.className = "dbanner ok";
+    b.textContent = `上次扫描完成：共 ${fmt(scan.total)} 个文件`;
+  } else {
+    b.style.display = "none";
+  }
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+async function load() {
+  try {
+    const r = await fetch("/api/dashboard");
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const d = await r.json();
+    renderOverview(d.totals || {});
+    renderMedia(d.media || {});
+    renderFolders(d.folders || {});
+    renderWorkers(d.workers || {});
+    renderQC(d.qc || {});
+    renderScan(d.scan);
+    $("dot").className = "ddot ok";
+    $("updated").textContent = "更新于 " + new Date().toLocaleTimeString("zh-CN");
+  } catch (e) {
+    $("dot").className = "ddot err";
+    $("updated").textContent = "连接失败，重试中…";
+  }
+}
+
+// 初始拉一次
+load();
+
+// 异步事件流：扫描/认领/审阅/质量/已处理等"随时变动的数据"由服务端推送驱动刷新（非轮询）。
+function scheduleRefresh() {
+  if (scheduleRefresh._t) return;
+  scheduleRefresh._t = setTimeout(function () { scheduleRefresh._t = null; load(); }, 500);
+}
+function connectEvents() {
+  if (window.__es && window.__es.readyState !== 2) return;
+  const es = new EventSource("/api/events");
+  window.__es = es;
+  const TYPES = ["scan", "claim", "review", "folder-clear", "folder-decision", "qc", "processed"];
+  es.onmessage = function (ev) {
+    let d;
+    try { d = JSON.parse(ev.data); } catch (e) { return; }
+    if (TYPES.indexOf(d.type) >= 0) scheduleRefresh();
+  };
+  es.onerror = function () { /* 浏览器会自动重连 */ };
+}
+connectEvents();
+
+// 事件流对慢订阅者会丢事件（见 events.go：进度类不保证送达）；回到前台时主动重同步一次。
+document.addEventListener("visibilitychange", function () {
+  if (document.visibilityState === "visible") { connectEvents(); load(); }
+});
+</script>
+</body>
+</html>

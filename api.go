@@ -99,6 +99,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /favicon.ico", h.handleFavicon)
 	mux.HandleFunc("GET /api/events", h.hub.ServeHTTP)
 	mux.HandleFunc("GET /api/status", h.handleStatus)
+	mux.HandleFunc("GET /api/dashboard", h.handleDashboard)
 	mux.HandleFunc("GET /api/users", h.handleUsers)
 	mux.HandleFunc("POST /api/scan", h.handleScan)
 	mux.HandleFunc("GET /api/browse", h.handleBrowse)
@@ -319,6 +320,46 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"totals":      t,
 		"canDownload": h.canDownload(r),
 		"gui":         h.gui,
+	})
+}
+
+// handleDashboard 给站长管理仪表盘用的聚合快照：总览 / 媒体构成 / 目录认领 / 在岗人员 /
+// 质量概况 / 扫描状态。同源页面直连，无 CORS 问题；与 /api/status 一样不鉴权（局域网管理视图）。
+func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
+	var t Totals
+	h.mu.Lock()
+	if time.Since(h.totalsT) > time.Second {
+		row := h.store.db.QueryRow(`SELECT
+			(SELECT COUNT(*) FROM file),
+			(SELECT COUNT(*) FROM review WHERE decision=1),
+			(SELECT COUNT(*) FROM review WHERE decision=2)`)
+		if err := row.Scan(&t.Files, &t.Keep, &t.Reject); err == nil {
+			t.Pending = t.Files - t.Keep - t.Reject
+			h.totals = t
+			h.totalsT = time.Now()
+		}
+	}
+	t = h.totals
+	h.mu.Unlock()
+
+	var photo, video, pend, done, folTotal, folClaimed int
+	_ = h.store.db.QueryRow(`SELECT COUNT(*) FROM file WHERE kind=? AND present=1`, kindImage).Scan(&photo)
+	_ = h.store.db.QueryRow(`SELECT COUNT(*) FROM file WHERE kind=? AND present=1`, kindVideo).Scan(&video)
+	_ = h.store.db.QueryRow(`SELECT COUNT(*) FROM file WHERE processed=0 AND present=1`).Scan(&pend)
+	_ = h.store.db.QueryRow(`SELECT COUNT(*) FROM file WHERE processed=1 AND present=1`).Scan(&done)
+	_ = h.store.db.QueryRow(`SELECT COUNT(*) FROM folder`).Scan(&folTotal)
+	_ = h.store.db.QueryRow(`SELECT COUNT(*) FROM claim`).Scan(&folClaimed)
+
+	workers, _ := h.store.ActiveWorkers(time.Now().UnixMilli() - 5*60*1000)
+	qcStat, _ := h.store.QCStatsAll()
+
+	writeJSON(w, map[string]any{
+		"totals":  t,
+		"media":   map[string]any{"photo": photo, "video": video, "processedPending": pend, "processedDone": done},
+		"folders": map[string]any{"total": folTotal, "claimed": folClaimed, "unclaimed": folTotal - folClaimed},
+		"workers": map[string]any{"count": len(workers), "list": workers},
+		"qc":      qcStat,
+		"scan":    h.scanner.Progress(),
 	})
 }
 

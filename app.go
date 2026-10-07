@@ -107,11 +107,11 @@ func newApp(cfg appConfig, logs *logRing, logPath string) (*app, error) {
 	a.hub = NewHub()
 	a.scanner = NewScanner(db, a.hub)
 	a.store = NewStore(db, cfg.root)
-	a.videos, err = NewVideoService(a.store, cfg.cacheDir, cfg.vres)
+	a.videos, err = NewVideoService(a.store, cfg.cacheDir, cfg.vres, a.hub)
 	if err != nil {
 		return nil, err
 	}
-	a.images, err = NewImageService(a.store, cfg.cacheDir, cfg.ires)
+	a.images, err = NewImageService(a.store, cfg.cacheDir, cfg.ires, a.hub)
 	if err != nil {
 		return nil, err
 	}

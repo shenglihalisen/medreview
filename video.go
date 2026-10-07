@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -56,6 +57,32 @@ type VideoService struct {
 	encChoice string // "cpu"/"n"=强制 libx264；"nvenc"/"qsv"/"amf"=只用那一个；"auto"/"y"/空=三个都试后择优
 	encMode   string // 已选中的编码器：""=libx264 软编；"nvenc"/"qsv"/"amf" 为硬件编码
 	encProbed bool
+
+	hub      *Hub
+	lastProc int64 // 节流：processed 事件广播至少相隔 1s
+}
+
+// markProcessed 标记已生成可浏览转码产物，并在成功后广播 processed 事件（供仪表盘异步刷新）。
+func (v *VideoService) markProcessed(id int64) {
+	if err := v.store.MarkProcessed(id); err != nil {
+		log.Printf("视频: 标记 processed 失败 id=%d: %v", id, err)
+		return
+	}
+	v.broadcastProcessed()
+}
+
+// broadcastProcessed 以约 1s 节流广播一次 processed 事件，避免大量转码完成把事件流打爆。
+func (v *VideoService) broadcastProcessed() {
+	if v.hub == nil {
+		return
+	}
+	now := time.Now().UnixNano()
+	if now-atomic.LoadInt64(&v.lastProc) < int64(time.Second) {
+		return
+	}
+	if atomic.CompareAndSwapInt64(&v.lastProc, atomic.LoadInt64(&v.lastProc), now) {
+		v.hub.Broadcast("processed", map[string]any{})
+	}
 }
 
 // transcodeProfile 是转码规格。它**参与缓存键**：改了分辨率/CRF/预设就等于换了产物，
@@ -163,13 +190,14 @@ type vstatus struct {
 	Msg    string `json:"msg"`
 }
 
-func NewVideoService(store *Store, cacheDir string, shortSide int) (*VideoService, error) {
+func NewVideoService(store *Store, cacheDir string, shortSide int, hub *Hub) (*VideoService, error) {
 	if err := os.MkdirAll(filepath.Join(cacheDir, "vtrans"), 0o755); err != nil {
 		return nil, err
 	}
 	v := &VideoService{
 		store:   store,
 		dir:     cacheDir,
+		hub:     hub,
 		probes:  map[string]probeInfo{},
 		jobs:    map[string]*videoJob{},
 		profile: transcodeProfile{shortSide: shortSide, crf: 26, preset: "veryfast"},
@@ -891,17 +919,19 @@ func (v *VideoService) WarmUp(ctx context.Context, conc int) {
 				qmu.Lock()
 				broken++
 				qmu.Unlock()
-			case isBrowserPlayable(pi.codec, pi.acodec):
-				// 编码本来就浏览器可播 —— 这就是"不一定都要转码"，直接跳过
-				v.setJob(&f, "done", 100, "")
-				qmu.Lock()
-				skip++
+		case isBrowserPlayable(pi.codec, pi.acodec):
+			// 编码本来就浏览器可播 —— 这就是"不一定都要转码"，直接跳过
+			v.setJob(&f, "done", 100, "")
+		v.markProcessed(f.ID)
+			qmu.Lock()
+			skip++
 				qmu.Unlock()
 			default:
-				if st, err := os.Stat(v.outPath(&f)); err == nil && st.Size() > 0 {
-					v.setJob(&f, "done", 100, "")
-					qmu.Lock()
-					cached++
+			if st, err := os.Stat(v.outPath(&f)); err == nil && st.Size() > 0 {
+			v.setJob(&f, "done", 100, "")
+			v.markProcessed(f.ID)
+			qmu.Lock()
+				cached++
 					qmu.Unlock()
 					return
 				}
@@ -968,8 +998,9 @@ func (v *VideoService) WarmUp(ctx context.Context, conc int) {
 				if st, serr := os.Stat(v.outPath(&it.f)); serr == nil {
 					mb = float64(st.Size()) / 1048576
 				}
-				v.setJob(&it.f, "done", 100, "")
-				log.Printf("  转码完成: %s %dx%d → %s（%s, %.1f MB）",
+			v.setJob(&it.f, "done", 100, "")
+			v.markProcessed(it.f.ID)
+			log.Printf("  转码完成: %s %dx%d → %s（%s, %.1f MB）",
 					it.f.Name, it.pi.w, it.pi.h, dims, time.Since(t0).Round(time.Second), mb)
 				v.warmSet(func(w *WarmupState) { w.Done++ })
 			}
@@ -1189,6 +1220,12 @@ func (h *Handler) handleVTrans(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_ = json.NewEncoder(w).Encode(st)
 		return
+	}
+	// 视频已可浏览（原生可播或转码完成）：标记 processed，供仪表盘统计（幂等，仅首次写）。
+	if err := h.store.MarkProcessed(f.ID); err != nil {
+		log.Printf("视频: 标记 processed 失败 id=%d: %v", f.ID, err)
+	} else {
+		h.video.broadcastProcessed()
 	}
 	if st.Source == "original" {
 		http.ServeFile(w, r, h.store.absPath(f.RelPath))

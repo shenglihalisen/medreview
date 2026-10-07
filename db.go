@@ -140,6 +140,8 @@ func ensureColumns(db *sql.DB) error {
 	need := []struct{ table, name, ddl string }{
 		{"qc", "device", "ALTER TABLE qc ADD COLUMN device TEXT NOT NULL DEFAULT ''"},
 		{"qc", "shoot_key", "ALTER TABLE qc ADD COLUMN shoot_key TEXT NOT NULL DEFAULT ''"},
+		// 仪表盘「待处理/已处理媒体」标记：图片预览生成成功、视频转码成功时置 1。
+		{"file", "processed", "ALTER TABLE file ADD COLUMN processed INTEGER NOT NULL DEFAULT 0"},
 	}
 	for _, c := range need {
 		rows, err := db.Query("PRAGMA table_info(" + c.table + ")")

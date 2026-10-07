@@ -54,14 +54,17 @@ type ImageService struct {
 
 	warmMu     sync.Mutex
 	warmCancel context.CancelFunc // 换目录时取消上一轮预热
+
+	hub      *Hub
+	lastProc int64 // 节流：processed 事件广播至少相隔 1s
 }
 
 const imagePreviewDir = "iprev"
 
 // NewImageService 创建图片预览服务。只建目录，不碰缓存内容 ——
 // 清理统一走 PrepareCache（必须在端口占住之后调用，理由同视频那边的注释）。
-func NewImageService(store *Store, cacheDir string, shortSide int) (*ImageService, error) {
-	s := &ImageService{store: store, dir: cacheDir, shortSide: shortSide}
+func NewImageService(store *Store, cacheDir string, shortSide int, hub *Hub) (*ImageService, error) {
+	s := &ImageService{store: store, dir: cacheDir, shortSide: shortSide, hub: hub}
 	s.ffmpeg = findTool("ffmpeg")
 	if shortSide <= 0 {
 		log.Println("图片预览: 已关闭（-ires 0，一律原图）")
@@ -147,7 +150,31 @@ func (s *ImageService) preview(ctx context.Context, f *FileItem, logFail bool) (
 		}
 		return src, true, nil
 	}
+	s.markProcessed(f.ID)
 	return out, false, nil
+}
+
+// markProcessed 标记已生成可浏览预览，并在成功后广播 processed 事件（供仪表盘异步刷新）。
+func (s *ImageService) markProcessed(id int64) {
+	if err := s.store.MarkProcessed(id); err != nil {
+		log.Printf("图片预览: 标记 processed 失败 id=%d: %v", id, err)
+		return
+	}
+	s.broadcastProcessed()
+}
+
+// broadcastProcessed 以约 1s 节流广播一次 processed 事件，避免预热期间海量浏览把事件流打爆。
+func (s *ImageService) broadcastProcessed() {
+	if s.hub == nil {
+		return
+	}
+	now := time.Now().UnixNano()
+	if now-atomic.LoadInt64(&s.lastProc) < int64(time.Second) {
+		return
+	}
+	if atomic.CompareAndSwapInt64(&s.lastProc, atomic.LoadInt64(&s.lastProc), now) {
+		s.hub.Broadcast("processed", map[string]any{})
+	}
 }
 
 // WarmFolder 预热一个目录层（见 warm）。
