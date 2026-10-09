@@ -291,10 +291,20 @@ func (h *Handler) Routes() http.Handler {
 			http.Redirect(w, r, "/home.html", http.StatusFound)
 			return
 		}
-		// 页面和脚本一律禁用缓存：exe 经常换代，浏览器留着上一版的 review.html
+		// 页面一律禁用缓存：exe 经常换代，浏览器留着上一版的 review.html
 		// 却配上这一版的 app.js（或反过来），就会出现工具栏控件重复、按钮失效这类
 		// 看起来像 bug 的现象 —— 刷新一次就好，但用户不知道要刷新。
+		//
+		// 但**静态资源**（js/css/图标）没必要跟着禁缓存：它们占了 150KB+，
+		// 每次开页面都重新传一遍，在无线/手机端就是实打实的「打开很慢」。
+		// 这里给它们一个短缓存 + must revalidate：既能在几秒内拿到旧资源，
+		// 又保证下次一定会问服务器有没有新版本（配合 ETag，命中就是 304 空响应）。
+		// HTML 仍然 no-store —— 上面说的「控件重复/按钮失效」正是它引起的。
 		w.Header().Set("Cache-Control", "no-store, must-revalidate")
+		switch strings.ToLower(filepath.Ext(r.URL.Path)) {
+		case ".js", ".css", ".png", ".svg", ".ico", ".webmanifest":
+			w.Header().Set("Cache-Control", "public, max-age=60, must-revalidate")
+		}
 		fsrv.ServeHTTP(w, r)
 	}))
 	return corsHandler(mux)

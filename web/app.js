@@ -89,16 +89,68 @@
     return API_BASE + p;
   }
 
-  // 跨域时（页面在 WorkBuddy 预览面板里打开），<img src> 会撞上预览服务的
+  // 跨域时（页面在WorkBuddy 预览面板里打开），<img src> 会撞上预览服务的
   // CSP `img-src 'self' data: blob: https:`（不含 127.0.0.1），图片被拦；
   // 但 CSP 的 `connect-src` 放行了 http://127.0.0.1:*，所以用 fetch 取回 blob、
   // 再转成 blob: URL 赋给 <img>，预览面板里也能正常显示缩略图。
+  //
+  // ⚠️ 性能注意（曾经踩过的坑）：
+  //   1. blob URL 必须 revoke —— 不 revoke 的话，浏览器要一直持着这些二进制，
+  //      几百张缩略图就能把内存顶起来，表现就是「用久了越来越卡」。这里在 img
+  //      真正解码完之后立刻 revoke（此刻浏览器已经把像素解码进内存，不再需要
+  //      那个 URL 指向的 blob 了）。
+  //   2. fetch 全量拿完才赋值，等于每张图都硬吃一个 RTT。改成立刻显示占位、
+  //      拿到 blob 再替换，配合上面的并发闸门，首屏不再白等。
+  //   3. 并发必须有上限：没有闸门时一页 200 张图会同时发出 200 个请求，
+  //      浏览器每个连接排队，表现反而比串行还慢。imgCount 是全局并发闸门。
+  var imgInFlight = 0;
+  var IMG_MAX_PARALLEL = 6; // 与后端图片转码的 3 并发错开，留一倍给浏览器解码
+
   function setImg(img, path, onFail) {
     if (!API_BASE) { img.src = path; return; }
+    if (imgInFlight >= IMG_MAX_PARALLEL) {
+      // 闸门满了：排队等一个空位，而不是继续加压。
+      setTimeout(function () { setImg(img, path, onFail); }, 120);
+      return;
+    }
+    imgInFlight++;
     fetch(path, { headers: { "X-User": encodeURIComponent(S.user) } })
       .then(function (r) { if (!r.ok) throw new Error(String(r.status)); return r.blob(); })
-      .then(function (b) { img.src = URL.createObjectURL(b); })
-      .catch(function () { if (onFail) onFail(); });
+      .then(function (b) {
+        var url = URL.createObjectURL(b);
+        img.src = url;
+        // 解码完成后释放 blob：此刻像素已进浏览器内存，不再需要这个 URL。
+        //
+        // ⚠️ 只能摘掉**我们**自己挂的 onload/onerror，不能碰调用方预设的 ——
+        // 灯箱就靠 img.onload 触发 layoutDirt()（脏点框/辅助线要按图片实际
+        // 显示矩形定位），被清掉的话那些覆盖层就再也不会摆正了。
+        var mine = function () {};
+        var done = function () {
+          URL.revokeObjectURL(url);
+          imgInFlight--;
+          if (img.onload === mine) img.onload = null;
+          if (img.onerror === mine) img.onerror = null;
+        };
+        // 既有 onload（布局脏点框等）必须在 revoke 之前先跑完
+        var prev = img.onload;
+        var wrapped = function () {
+          if (prev) { try { prev.call(img); } catch (e) {} }
+          done();
+        };
+        img.onload = wrapped;
+        img.onerror = mine = function () { done(); };
+        // decode() 存在时以它为准（更准，能确保像素真的可用了）；否则退回 onload
+        if (img.decode) {
+          img.decode().then(function () {
+            if (img.onload === wrapped) return; // onload 已经跑过并 revoke 了
+            done();
+          }, function () {});
+        }
+      })
+      .catch(function () {
+        imgInFlight--;
+        if (onFail) onFail();
+      });
   }
 
   // 视频：先问服务端这个文件浏览器能不能直接播。
@@ -117,6 +169,43 @@
         onReady(U("/api/media?id=" + id));
         return true;
       });
+  }
+
+  // 缩略图按需加载：卡片进入视口才发起真正的加载。
+  //
+  // 为什么不用原生 loading="lazy"：跨域预览面板那条路径是 fetch 完才把 blob URL
+  // 赋给 src，浏览器在那之前就判定过可见性了，lazy 完全不生效 —— 结果是屏幕外
+  // 的卡片也在抢连接。只有自己盯着「元素真的进了视口」才靠得住。
+  //
+  // 用单个共享 observer（不是每张图一个）：几百个 observer 实例本身就慢。
+  var lazyObserver = null;
+  function getLazyObserver() {
+    if (lazyObserver) return lazyObserver;
+    if (!("IntersectionObserver" in window)) return null;
+    lazyObserver = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e) {
+        if (!e.isIntersecting) return;
+        var node = e.target;
+        lazyObserver.unobserve(node); // 只触发一次
+        var go = node._lazyGo;
+        node._lazyGo = null;
+        // 节点可能已经被窗口化回收（remove 后才调 cancelLazy，存在极短竞态窗口），
+        // 这时打进去就是「A 的图显示在 B 上」，所以先确认它还在文档里。
+        if (go && node.isConnected) go();
+      });
+    }, { rootMargin: "300px 0px" }); // 提前一屏开始加载，滚到时通常已经就绪
+    return lazyObserver;
+  }
+
+  function lazyLoad(img, node, go) {
+    var obs = getLazyObserver();
+    if (!obs) { go(); return; } // 老浏览器：退化成立即加载
+    node._lazyGo = go;
+    obs.observe(node);
+    // 节点被窗口化复用/移除时，别让挂起的回调打进错误的卡片
+    node._lazyCancel = function () {
+      if (node._lazyGo) { obs.unobserve(node); node._lazyGo = null; }
+    };
   }
 
   // ---------- 基础请求 ----------
@@ -689,8 +778,16 @@
   }
 
   function clearPool() {
-    S.pool.forEach(function (e) { hoverPreview(e, false); e.remove(); });
+    S.pool.forEach(function (e) { hoverPreview(e, false); e.remove(); cancelLazy(e); });
     S.pool.clear();
+  }
+
+  // 取消节点上挂起的懒加载回调。窗口化会把节点复用给另一张图，
+  // 挂起的回调若打进去，就是「A 的图显示在 B 上」。
+  // ⚠️ clearPool/render 里那两行 'hoverPreview(..., false); ....remove()' 的写法
+  // 被 _verify/check_mobile_shell.py 按字面文本断言，别把它们合并或换行。
+  function cancelLazy(node) {
+    if (node._lazyCancel) { node._lazyCancel(); node._lazyCancel = null; }
   }
 
   function render() {
@@ -716,7 +813,14 @@
     for (var i = start; i < end; i++) need.add(i);
 
     S.pool.forEach(function (node, idx) {
-      if (!need.has(idx)) { hoverPreview(node, false); node.remove(); S.pool.delete(idx); }
+      if (!need.has(idx)) {
+        hoverPreview(node, false); node.remove();
+        S.pool.delete(idx);
+        // remove 之后再取消挂起的懒加载：节点已脱离文档，交给 cancelLazy 收尾。
+        // （这一行的位置不能动 —— _verify/check_mobile_shell.py 按字面文本
+        //   'hoverPreview(node, false); node.remove()' 断言窗口化回收逻辑。）
+        cancelLazy(node);
+      }
     });
 
     for (var j = start; j < end; j++) {
@@ -774,7 +878,11 @@
             setTimeout(function () { tryImg(true); }, 1500);
           });
         };
-        tryImg(false);
+        // 这里**不能靠 img.loading="lazy"**：src 是 fetch 完成后才设的 blob URL，
+        // 浏览器那会儿早就判定过了，整屏图会一次性全开。窗口化渲染已经把屏幕外的
+        // 卡片剔掉了，但一屏仍有几十张，一次性 fetch 依然会把连接池打满。
+        // 所以用 IntersectionObserver 真按需：卡片进入视口才发请求。
+        lazyLoad(img, thumb, function () { tryImg(false); });
       } else {
         img.src = mediaURL(f, S.quality === "orig");
         img.onerror = function () {
