@@ -28,6 +28,8 @@ type appConfig struct {
 	dbExplicit bool   // 是否由用户显式指定了 -db（指定后跨重启保留，启动/退出都不自动清库）
 	cacheDir   string // 转码缓存目录
 	token      string // 下载口令，空 = 随机生成
+	tokenGiven bool   // 是否由用户显式指定（-token）。false = 随机生成的，
+	// 打印时要说明清楚，否则用户看到日志里那串 hex 会以为程序"编造"了口令。
 	openDL     bool   // 关闭下载口令校验
 	allowQueryToken bool // 允许 ?t=口令 鉴权（默认关，见 main.go 的 -allow-query-token）
 	vjobs      int    // 视频预热并发数
@@ -125,6 +127,9 @@ func newApp(cfg appConfig, logs *logRing, logPath string) (*app, error) {
 		tok = randomToken()
 	}
 	a.token = tok
+	// 记下口令是不是用户自己指定的：随机生成的要能在打印时说明白，
+	// 否则用户看到日志里那串 24 位 hex 会以为程序编造了口令（2026-10-10 反馈）。
+	a.cfg.tokenGiven = cfg.token != ""
 
 	a.h = &Handler{
 		store:   a.store,
@@ -392,7 +397,19 @@ func (a *app) printBanner() {
 		log.Printf("下载页（可标记+下载）: %s  [未启用口令]", downloadURL)
 	} else {
 		log.Printf("下载页（可标记+下载）: %s", downloadURL)
-		log.Printf("下载口令: %s", a.token)
+		// 口令来源要说清楚（用户 2026-10-10 反馈）：
+		// 双击 exe / 拖 exe 启动时**没传-token**，口令是随机生成的，
+		// 日志里那串 24 位 hex 用户没输入过，看着像"虚假的口令"。
+		// 这里明确区分「你指定的」与「随机生成的」，并告诉后者怎么改成自己指定。
+		if a.cfg.tokenGiven {
+			log.Printf("下载口令: %s", a.token)
+		} else {
+			log.Printf("下载口令: %s", a.token)
+			log.Println("  ↑ 这是**本次随机生成**的口令（你没输入过它）。")
+			log.Println("    想自己指定一个固定的，请改用随包的「启动审阅.bat」输入口令启动，")
+			log.Println("    或把文件夹拖到 bat 图标上；也可直接带参数启动：")
+			log.Println("      medreview.exe -root \"D:\\你的素材目录\" -token \"你的口令\"")
+		}
 	}
 	hubURL := strings.TrimSuffix(reviewURL, "/review.html") + "/home.html"
 	log.Printf("总入口（审阅/下载/仪表盘）: %s", hubURL)

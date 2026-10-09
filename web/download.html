@@ -62,6 +62,7 @@
 
   <div id="main">
     <div id="toolbar">
+      <button class="btn" id="btn-drawer" type="button" aria-label="打开目录">☰</button>
       <a class="btn home-btn" href="/home.html" title="返回入口页">← 入口</a>
       <span class="mode-badge mode-dl" title="此页面可对已标记的文件打包 / 导出下载">下载模式 · 可标记 / 打包下载</span>
       <span class="crumb" id="crumb">素材</span>
@@ -152,7 +153,11 @@
   </div>
 </div>
 
-<div id="rotate-gate">
+<!-- 抽屉遮罩：竖屏点它关闭文件树 -->
+<div class="drawer-mask" id="drawer-mask"></div>
+
+<!-- 竖屏软提示条：只给建议、可关闭，不再硬锁竖屏（docs/design/mobile-portrait.md） -->
+<div id="rotate-gate" hidden>
   <div class="rotate-box">
     <svg class="rotate-icon" viewBox="0 0 64 40" aria-hidden="true">
       <rect x="8" y="4" width="20" height="32" rx="3" fill="none" stroke="currentColor" stroke-width="2.5"/>
@@ -161,8 +166,8 @@
       <path d="M54 12l4 6 4-6" fill="none" stroke="currentColor" stroke-width="2.5"
             stroke-linecap="round" stroke-linejoin="round" transform="translate(-3 0)"/>
     </svg>
-    <p>请横屏使用</p>
-    <p class="sub">本工具只针对横屏设计</p>
+    <p>建议横屏获得最佳体验</p>
+    <button class="rotate-dismiss" type="button" id="rotate-dismiss">继续竖屏</button>
   </div>
 </div>
 
