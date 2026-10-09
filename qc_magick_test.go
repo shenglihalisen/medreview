@@ -36,11 +36,13 @@ func TestQCAnalyzePathMagickFormat(t *testing.T) {
 	m := &QCManager{store: st, magick: magick}
 
 	f := FileItem{ID: 1, RelPath: "t.avif", Kind: kindImage, Size: info.Size(), MTime: 1}
-	src := m.analyzePath(context.Background(), f)
+	src, owned := m.analyzePath(context.Background(), f)
 	if src == "" {
 		t.Fatal("magick 格式应当返回可分析的临时 JPEG，却返回了空（被跳过）")
 	}
-	defer os.Remove(src)
+	if owned {
+		defer os.Remove(src)
+	}
 	abs := st.absPath("t.avif")
 	if src == abs {
 		t.Fatal("magick 格式应转成临时文件，不应直接返回源文件")
@@ -76,7 +78,7 @@ func TestQCAnalyzePathMagickSkippedWithoutMagick(t *testing.T) {
 	}
 	m := &QCManager{store: st, magick: ""} // 没装 magick
 	f := FileItem{ID: 1, RelPath: "t.avif", Kind: kindImage, Size: 16, MTime: 1}
-	if got := m.analyzePath(context.Background(), f); got != "" {
+	if got, _ := m.analyzePath(context.Background(), f); got != "" {
 		t.Fatalf("没装 magick 时应跳过（返回空），实际返回 %q", got)
 	}
 }
@@ -86,8 +88,11 @@ func TestQCAnalyzePathPlainImageUnchanged(t *testing.T) {
 	st := newTestStore(t)
 	m := &QCManager{store: st, magick: findTool("magick")}
 	f := FileItem{ID: 1, RelPath: "a.jpg", Kind: kindImage, Size: 1, MTime: 1}
-	got := m.analyzePath(context.Background(), f)
+	got, owned := m.analyzePath(context.Background(), f)
 	if got != st.absPath("a.jpg") {
 		t.Fatalf("普通 jpg 应直接返回源路径，实际 %q", got)
+	}
+	if owned {
+		t.Fatal("普通 jpg 直接用源文件，不该声明 owned（否则会被误删）")
 	}
 }

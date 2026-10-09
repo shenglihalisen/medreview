@@ -116,7 +116,9 @@ func newApp(cfg appConfig, logs *logRing, logPath string) (*app, error) {
 	if err != nil {
 		return nil, err
 	}
-	a.qc = NewQCManager(findTool("ffmpeg"), findTool("ffprobe"), findTool("magick"), cfg.cacheDir, a.store, a.hub)
+	// 把 a.images 传给 QC：QC 对相机 RAW 可以直接复用预览缓存，
+	// 省掉第二次 ImageMagick 解码（解码 RAW 是整条链路最贵的一步）。
+	a.qc = NewQCManager(findTool("ffmpeg"), findTool("ffprobe"), findTool("magick"), cfg.cacheDir, a.store, a.hub, a.images)
 
 	tok := cfg.token
 	if tok == "" {

@@ -28,6 +28,10 @@ type QCManager struct {
 	store  *Store
 	hub    *Hub
 	magick string // ImageMagick 路径；用于把 ffmpeg 解不开的格式（相机 RAW / HEIC / AVIF / JXL / PSD）先转成 JPEG 再做 QC
+	// images 用来**复用预览缓存**：相机 RAW 只有 magick 能解，而解码 RAW 是整条
+	// 链路最贵的一步；预览转码与 QC 原本各解一遍同一个文件。QC 通过它拿到已经
+	// 转好的预览图，两笔合成一笔。nil 时退回「自己转临时 JPEG」的老路。
+	images *ImageService
 
 	mu        sync.Mutex
 	parent    context.Context
@@ -55,13 +59,17 @@ type QCManager struct {
 	onChange func()
 }
 
-func NewQCManager(ffmpeg, ffprobe, magick, cacheDir string, store *Store, hub *Hub) *QCManager {
+// NewQCManager 装配 QC 检测器。
+// images 传nil 时 QC 会退回「自己转临时 JPEG」的老路；传了就优先复用预览缓存
+// （见 QCManager.images 与 ImageService.QCSource 的说明，能省掉一次 RAW 解码）。
+func NewQCManager(ffmpeg, ffprobe, magick, cacheDir string, store *Store, hub *Hub, images *ImageService) *QCManager {
 	parent, cancel := context.WithCancel(context.Background())
 	return &QCManager{
 		svc:       qc.NewQCService(ffmpeg, ffprobe, cacheDir),
 		store:     store,
 		hub:       hub,
 		magick:    magick,
+		images:    images,
 		parent:    parent,
 		cancelAll: cancel,
 		sem:       make(chan struct{}, 3), // 3 个视频同时 QC（用户 2026-10-01）
@@ -196,29 +204,43 @@ func (m *QCManager) runAll(ctx context.Context, files []FileItem, onDone func())
 	}
 }
 
-// analyzePath 返回真正拿去做 QC 的文件路径。
+// analyzePath 返回真正拿去做 QC 的文件路径，以及「用完要不要删」。
 //
-// ffmpeg 解不开的格式（相机 RAW / HEIC / AVIF / JXL / PSD）会被 runImage 误判成
-// 「损坏」（一帧都解不出来 → FlagCorrupted）。这里先用 ImageMagick 转成临时 JPEG，
-// 再交给现有检测器 —— 既让 RAW/HEIC 也能做 blank/blur/lens-dirt 等质量检查，
-// 又避免它们被错标成损坏。
+// 优先**复用预览缓存**（省算力，见 ImageService.QCSource 的说明）：相机 RAW 只有
+// ImageMagick 能解，而解码 RAW 是整条链路最贵的一步；预览转码与 QC 原本各解一遍
+// 同一个文件，纯重复。拿到预览缓存后两笔合成一笔。
+//
+// 没装配 ImageService（单测）或复用失败时，退回原来自己转临时 JPEG 的做法 ——
+// 那条路会产生 owned=true 的临时文件，用完必须删。
 //
 // 返回 "" 表示跳过该文件：magick 格式但没装 magick、或转换失败。注意是「跳过」
 // 而不是「标损坏」，这两者天差地别（后者会把好照片当废片）。
-func (m *QCManager) analyzePath(ctx context.Context, f FileItem) string {
+func (m *QCManager) analyzePath(ctx context.Context, f FileItem) (string, bool) {
 	abs := m.store.absPath(f.RelPath)
 	if f.Kind != kindImage {
-		return abs // 视频都是 ffmpeg 能解的，不涉及 magick
+		return abs, false // 视频都是 ffmpeg 能解的，不涉及 magick
 	}
 	fd, ok := formatOf(strings.ToLower(filepath.Ext(f.RelPath)))
 	if !ok || fd.Decoder != decMagick {
-		return abs // ffmpeg 能直接解，不用 magick
+		return abs, false // ffmpeg 能直接解，不用 magick
 	}
 	if m.magick == "" {
 		// 没装 ImageMagick：这种格式本就解不开，跳过而非误判损坏。
 		log.Printf("QC: %s 是 ImageMagick 专属格式但本机未安装 ImageMagick，跳过检测", f.RelPath)
-		return ""
+		return "", false
 	}
+
+	// ① 首选：问 ImageService 要图（命中预览缓存就零成本复用）。
+	if m.images != nil {
+		if p, _, err := m.images.QCSource(ctx, &f); err == nil && p != "" {
+			return p, false // 都是共享缓存/原文件，调用方不要删
+		}
+		// err != nil 或 p == ""：转不出来，按「跳过」处理，绝不当成损坏。
+		log.Printf("QC: %s 复用预览缓存失败，跳过检测", f.RelPath)
+		return "", false
+	}
+
+	// ② 回退：自己转临时 JPEG（ImageService 没装配时走这条）。
 	// 与 image.go 的 transcodeMagick 同理给重试：magick 解 30~40MB 的相机 RAW 时
 	// 偶发失败（杀软扫刚落的临时文件 / 瞬时文件锁），且失败时 stderr 常为空、只有
 	// exit status 1。抖动是偶发的，重试即可；真失败（文件真损坏）重试也只是多花几百 ms。
@@ -228,7 +250,7 @@ func (m *QCManager) analyzePath(ctx context.Context, f FileItem) string {
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		tmp, err := os.CreateTemp("", "qc-magick-*.jpg")
 		if err != nil {
-			return ""
+			return "", false
 		}
 		tmpName := tmp.Name()
 		// 必须关闭句柄再交给 magick：Windows 上文件仍被本进程打开时，
@@ -248,7 +270,7 @@ func (m *QCManager) analyzePath(ctx context.Context, f FileItem) string {
 		st, statErr := os.Stat(tmpName)
 		ok := runErr == nil && statErr == nil && st.Size() > 0
 		if ok {
-			return tmpName // 调用方用完需 os.Remove 清理这个临时文件
+			return tmpName, true // 临时文件：用完需os.Remove 清理
 		}
 		os.Remove(tmpName)
 		if runErr != nil {
@@ -264,7 +286,7 @@ func (m *QCManager) analyzePath(ctx context.Context, f FileItem) string {
 		}
 	}
 	log.Printf("QC: %s 经 ImageMagick 解码失败，跳过: %v", f.RelPath, lastErr)
-	return ""
+	return "", false
 }
 
 func (m *QCManager) runOne(ctx context.Context, f FileItem) {
@@ -273,13 +295,14 @@ func (m *QCManager) runOne(ctx context.Context, f FileItem) {
 		return
 	default:
 	}
-	src := m.analyzePath(ctx, f)
+	src, owned := m.analyzePath(ctx, f)
 	if src == "" {
 		return // 跳过（magick 格式没装工具/转换失败，或非可解格式）
 	}
-	// 临时 JPEG（magick 转出来的）用完即删；源文件本身不动。
+	// 只有「自己转出来的临时 JPEG」用完即删；复用来的预览缓存与原文件都要留着
+	//（预览缓存是共享产物，删了用户点开那张图就得重新转）。
 	defer func() {
-		if src != m.store.absPath(f.RelPath) {
+		if owned {
 			os.Remove(src)
 		}
 	}()
