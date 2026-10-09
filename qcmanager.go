@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
@@ -218,26 +219,52 @@ func (m *QCManager) analyzePath(ctx context.Context, f FileItem) string {
 		log.Printf("QC: %s 是 ImageMagick 专属格式但本机未安装 ImageMagick，跳过检测", f.RelPath)
 		return ""
 	}
-	tmp, err := os.CreateTemp("", "qc-magick-*.jpg")
-	if err != nil {
-		return ""
-	}
-	tmpName := tmp.Name()
-	tmp.Close()
-	// 限制长边 2000 足够 QC 的 blur/noise 细节；-auto-orient 转正 EXIF 方向。
-	// 不缩太小：QC 的模糊/噪点检测依赖原分辨率细节，缩太狠会漏检。
-	args := []string{abs, "-auto-orient", "-resize", "2000x2000>", "-quality", "90", tmpName}
-	cmd := exec.CommandContext(ctx, m.magick, args...)
-	// magick 要靠 MAGICK_HOME 定位同目录的配置 xml/icc（内嵌释放时尤其依赖，见 magick_embed.go）
-	cmd.Env = magickEnv(filepath.Dir(m.magick))
-	var buf bytes.Buffer
-	cmd.Stderr = &buf
-	if err := cmd.Run(); err != nil {
+	// 与 image.go 的 transcodeMagick 同理给重试：magick 解 30~40MB 的相机 RAW 时
+	// 偶发失败（杀软扫刚落的临时文件 / 瞬时文件锁），且失败时 stderr 常为空、只有
+	// exit status 1。抖动是偶发的，重试即可；真失败（文件真损坏）重试也只是多花几百 ms。
+	// 注意 QC 这里绝不能把失败当「损坏」—— 返回 "" 只表示跳过检测。
+	const maxAttempts = 3
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		tmp, err := os.CreateTemp("", "qc-magick-*.jpg")
+		if err != nil {
+			return ""
+		}
+		tmpName := tmp.Name()
+		// 必须关闭句柄再交给 magick：Windows 上文件仍被本进程打开时，
+		// magick 可能写不进去（表现为 exit status 1 且 stderr 为空）。
+		tmp.Close()
+		// 限制长边 2000 足够 QC 的 blur/noise 细节；-auto-orient 转正 EXIF 方向。
+		// 不缩太小：QC 的模糊/噪点检测依赖原分辨率细节，缩太狠会漏检。
+		args := []string{abs, "-auto-orient", "-resize", "2000x2000>", "-quality", "90", tmpName}
+		cmd := exec.CommandContext(ctx, m.magick, args...)
+		// magick 要靠 MAGICK_HOME 定位同目录的配置 xml/icc（内嵌释放时尤其依赖，见 magick_embed.go）
+		cmd.Env = magickEnv(filepath.Dir(m.magick))
+		var buf bytes.Buffer
+		cmd.Stderr = &buf
+		runErr := cmd.Run()
+		// 校验产物：exit 0 但没写出/写出 0 字节都算失败，
+		// 否则空图会被后面的检测器当成「空白/损坏」误判。
+		st, statErr := os.Stat(tmpName)
+		ok := runErr == nil && statErr == nil && st.Size() > 0
+		if ok {
+			return tmpName // 调用方用完需 os.Remove 清理这个临时文件
+		}
 		os.Remove(tmpName)
-		log.Printf("QC: %s 经 ImageMagick 解码失败，跳过: %v (%s)", f.RelPath, err, strings.TrimSpace(buf.String()))
-		return ""
+		if runErr != nil {
+			lastErr = fmt.Errorf("%v (%s)", runErr, strings.TrimSpace(buf.String()))
+		} else {
+			lastErr = fmt.Errorf("未产出有效 JPEG")
+		}
+		if ctx.Err() != nil {
+			break // 整轮 QC 被取消（换根目录/退出），别再重试
+		}
+		if attempt+1 < maxAttempts {
+			time.Sleep(time.Duration(attempt+1) * 300 * time.Millisecond)
+		}
 	}
-	return tmpName // 调用方用完需 os.Remove 清理这个临时文件
+	log.Printf("QC: %s 经 ImageMagick 解码失败，跳过: %v", f.RelPath, lastErr)
+	return ""
 }
 
 func (m *QCManager) runOne(ctx context.Context, f FileItem) {

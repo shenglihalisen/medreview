@@ -366,34 +366,69 @@ func (s *ImageService) transcode(ctx context.Context, src, out string, w, h int,
 //
 // 失败处理：调用方（preview）会把它当成「转码失败」回退原文件，这里只负责尽力转、
 // 并清理临时文件，不自行决定降级策略。
+//
+// 为什么必须重试（与上面 transcode 的 ffmpeg 路径同理）：相机 RAW 单文件就有 30~40MB，
+// Q16 解码 6000×4000 峰值内存上百 MB，临时 JPEG 又是刚落盘的新文件 —— 杀软实时扫描它、
+// 或瞬时文件锁，都可能让 magick 偶发失败。而且 **magick 失败时 stderr 常常是空的**，
+// 只有一个 exit status 1（错误没刷到 stderr），没法像 ffmpeg 那样按 "Permission denied"
+// 精确判断，只能像 ffmpeg 路径那样对「任何失败」做有限次退避重试：
+// 抖动是偶发的，重试一次通常就成了；真失败（文件损坏/格式不支持）重试也只是多花几百 ms。
 func (s *ImageService) transcodeMagick(ctx context.Context, src, out string) error {
 	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
 		return err
 	}
-	// -auto-orient 转正 EXIF 方向（相机 RAW / 手机 HEIC 常见竖拍横存）；
-	// -resize "NxN>" 只在比 N 大时才缩，保持比例；-quality 85 够预览用。
-	// 临时文件必须带 .jpg 扩展名：magick 靠输出扩展名推断格式，
-	// 无扩展名时写不出内容（实测产物 0 字节）。最终由 moveFileWithRetry 改名成 out（也是 .jpg）。
-	tmp := fmt.Sprintf("%s.part.%d.jpg", out, atomic.AddUint64(&s.tmpSeq, 1))
-	args := []string{
-		src, "-auto-orient",
-		"-resize", fmt.Sprintf("%dx%d>", s.shortSide, s.shortSide),
-		"-quality", "85",
-		tmp,
+	const maxAttempts = 3 // 与 ffmpeg 路径对齐：抖动重试，真失败快速放弃
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		// 临时文件必须带 .jpg 扩展名：magick 靠输出扩展名推断格式，
+		// 无扩展名时写不出内容（实测产物 0 字节）。每次重试用全新名字，
+		// 避免上次的残留被当成半成品。最终由 moveFileWithRetry 改名成 out（也是 .jpg）。
+		tmp := fmt.Sprintf("%s.part.%d.jpg", out, atomic.AddUint64(&s.tmpSeq, 1))
+		// -auto-orient 转正 EXIF 方向（相机 RAW / 手机 HEIC 常见竖拍横存）；
+		// -resize "NxN>" 只在比 N 大时才缩，保持比例；-quality 85 够预览用。
+		args := []string{
+			src, "-auto-orient",
+			"-resize", fmt.Sprintf("%dx%d>", s.shortSide, s.shortSide),
+			"-quality", "85",
+			tmp,
+		}
+		cmd := exec.CommandContext(ctx, s.magick, args...)
+		// magick 要靠 MAGICK_HOME 定位同目录的配置 xml/icc（内嵌释放时尤其依赖，见 magick_embed.go）
+		cmd.Env = magickEnv(filepath.Dir(s.magick))
+		var errBuf bytes.Buffer
+		cmd.Stderr = &errBuf
+		err := cmd.Run()
+		if err == nil {
+			// magick 偶发「exit 0 却写不出内容」，必须校验产物真的存在且非 0 字节，
+			// 否则空图会被当成合法预览缓存下来（后续表现为空白预览）。
+			// ⚠️ 顺序要紧：先 stat 校验、再 move，最后才清理 —— 反过来会把产物自己删掉。
+			st, statErr := os.Stat(tmp)
+			switch {
+			case statErr != nil:
+				lastErr = fmt.Errorf("magick: 未产出预览文件: %v", statErr)
+			case st.Size() == 0:
+				lastErr = fmt.Errorf("magick: 产出 0 字节预览文件")
+			default:
+				if mvErr := moveFileWithRetry(tmp, out); mvErr != nil {
+					lastErr = mvErr
+				} else {
+					return nil // tmp 已被 moveFileWithRetry 挪走
+				}
+			}
+		} else {
+			lastErr = fmt.Errorf("magick: %v: %s", err, strings.TrimSpace(errBuf.String()))
+		}
+		_ = os.Remove(tmp) // 失败路径清掉本次临时文件（成功路径已挪走，这里是 no-op）
+		if ctx.Err() != nil {
+			return lastErr // 整个预热被取消（换根目录/退出），别再重试
+		}
+		if attempt+1 < maxAttempts {
+			log.Printf("图片预览: %s 经 ImageMagick 转码失败（%v），第 %d 次重试",
+				filepath.Base(src), lastErr, attempt+1)
+			time.Sleep(time.Duration(attempt+1) * 300 * time.Millisecond)
+		}
 	}
-	cmd := exec.CommandContext(ctx, s.magick, args...)
-	// magick 要靠 MAGICK_HOME 定位同目录的配置 xml/icc（内嵌释放时尤其依赖，见 magick_embed.go）
-	cmd.Env = magickEnv(filepath.Dir(s.magick))
-	var errBuf bytes.Buffer
-	cmd.Stderr = &errBuf
-	if err := cmd.Run(); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("magick: %v: %s", err, strings.TrimSpace(errBuf.String()))
-	}
-	if err := moveFileWithRetry(tmp, out); err != nil {
-		return err
-	}
-	return nil
+	return lastErr
 }
 
 // moveFileWithRetry 把 src 原子落盘到 dst，专门消化「rename 偶发找不到源」的瞬时抖动：
