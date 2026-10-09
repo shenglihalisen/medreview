@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -252,28 +253,49 @@ func (s *ImageService) warm(folderIDs []int64) {
 	}
 	log.Printf("图片预览: 开始预热（待转 %d 张 / 共 %d 张）", len(todo), len(files))
 
+	// 并发度接入全局负载预算（loadbudget.go）：与视频预热共用额度，
+	// 两边各开 3 的��话就是 6 个重负载进程在 8 核上互踩，网页请求全被拖慢。
+	workers := bgSlots()
+	// 图片转码很快（毫秒级~百毫秒级），至少给 2 个，别让预热退化成串行。
+	if workers < 2 {
+		workers = 2
+	}
+
+	// 用固定 worker 池逐个取，而不是「每张图一个 goroutine 再抢 sem」：
+	// 几百张图 = 几百个 goroutine 同时创建，光调度开销就够卡一下了。
+	queue := make(chan FileItem)
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, 3) // 图片转码很快，3 并发足够又不占满 CPU
 	var conv int64
-	for i := range todo {
-		if ctx.Err() != nil {
-			break
-		}
-		f := todo[i]
+	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			select {
-			case sem <- struct{}{}:
-			case <-ctx.Done():
-				return
-			}
-			defer func() { <-sem }()
-			if _, orig, perr := s.preview(ctx, &f, false); perr == nil && !orig {
-				atomic.AddInt64(&conv, 1)
+			// 注册进全局预算，让视频转码知道图片这边占了多少额度。
+			enterJob()
+			defer leaveJob()
+			for f := range queue {
+				if ctx.Err() != nil {
+					return
+				}
+				if _, orig, perr := s.preview(ctx, &f, false); perr == nil && !orig {
+					atomic.AddInt64(&conv, 1)
+				}
 			}
 		}()
 	}
+	go func() {
+		defer close(queue)
+		for i := range todo {
+			if ctx.Err() != nil {
+				return
+			}
+			select {
+			case queue <- todo[i]:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 	wg.Wait()
 	if ctx.Err() == nil {
 		log.Printf("图片预览: 预热完成（本轮转码 %d 张）", atomic.LoadInt64(&conv))
@@ -296,7 +318,10 @@ func (s *ImageService) transcode(ctx context.Context, src, out string, w, h int,
 	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
 		return err
 	}
-	baseArgs := []string{"-y", "-v", "error", "-i", src}
+	// 线程限流（与视频转码同一个道理，见 loadbudget.go）：ffmpeg 默认吃满所有核，
+	// 几个图片预热并发叠上视频转码就把机器打满，网页请求跟着卡。
+	baseArgs := []string{"-y", "-v", "error", "-i", src,
+		"-threads", strconv.Itoa(transcodeThreads(int(activeJobs.Load())))}
 	if known {
 		baseArgs = append(baseArgs, "-vf", fmt.Sprintf("scale=%d:%d", w, h))
 	} else {
