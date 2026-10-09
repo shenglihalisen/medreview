@@ -156,6 +156,10 @@ func (h *Handler) handleCopy(w http.ResponseWriter, r *http.Request) {
 
 	// 导出清单：范围内每一个文件（含未保留的）都列进表里 ——
 	// 目录位置 / 文件名 / 是否保留 / 是否已导出，写到目标目录的 导出清单.csv。
+	//
+	// 注意这份落在**用户指定的目标目录**，是他的产物，我们不删也不动
+	// （用户 2026-10-10 明确：只清程序自己生成的那些）。同名固定、
+	// 覆盖写，所以重复导出到同一个目录也不会堆积。
 	manifestPath := ""
 	if all, err := h.store.FilesInFolders(ids); err == nil {
 		summary := [][2]string{
@@ -173,6 +177,9 @@ func (h *Handler) handleCopy(w http.ResponseWriter, r *http.Request) {
 			manifestPath = mf
 			log.Printf("导出清单: %s", mf)
 		}
+		// 顺便在程序目录也落一份统一的「打包清单.csv」：用户不用去导出目录
+		// 到处找就能看到最近一次的清单，同样遵循「只留一份、退出清旧」。
+		writeManifest(mb)
 	} else {
 		log.Printf("读取导出范围文件清单失败: %v", err)
 	}

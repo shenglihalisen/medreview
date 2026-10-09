@@ -105,8 +105,9 @@ func (h *Handler) handleZip(w http.ResponseWriter, r *http.Request) {
 		written++
 		totalBytes += f.Size
 	}
-	// 导出清单：一式两份 —— ① zip 里附带一份；② 运行目录旁边落一份
-	// （用户要求：打包下载时，除了压缩包本身，旁边还要有一份 Excel 能打开的明细表）。
+	// 导出清单：一式两份 —— ① zip 里附带一份；② 程序工作目录落一份。
+	// 第二份走writeManifest()：固定文件名 + 先清旧的，任意时刻目录里最多一份
+	// （用户 2026-10-10 要求：最终只留一份 CSV，其余退出时自动删）。
 	if all, err := h.store.FilesInFolders(ids); err == nil {
 		status := map[int64]string{}
 		for _, f := range files {
@@ -121,12 +122,7 @@ func (h *Handler) handleZip(w http.ResponseWriter, r *http.Request) {
 		if w2, e := zw.Create("导出清单.csv"); e == nil {
 			w2.Write(mb)
 		}
-		mname := fmt.Sprintf("打包清单_%s.csv", time.Now().Format("20060102-150405"))
-		if werr := os.WriteFile(mname, mb, 0o644); werr != nil {
-			log.Printf("写打包清单失败: %v", werr)
-		} else {
-			log.Printf("打包清单: %s", mname)
-		}
+		writeManifest(mb)
 	}
 	if err := zw.Close(); err != nil && !clientGone {
 		if isClientAbort(err) {
