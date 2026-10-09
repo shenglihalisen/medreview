@@ -382,6 +382,8 @@ func (s *ImageService) transcodeMagick(ctx context.Context, src, out string) err
 		tmp,
 	}
 	cmd := exec.CommandContext(ctx, s.magick, args...)
+	// magick 要靠 MAGICK_HOME 定位同目录的配置 xml/icc（内嵌释放时尤其依赖，见 magick_embed.go）
+	cmd.Env = magickEnv(filepath.Dir(s.magick))
 	var errBuf bytes.Buffer
 	cmd.Stderr = &errBuf
 	if err := cmd.Run(); err != nil {

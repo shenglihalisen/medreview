@@ -228,6 +228,8 @@ func (m *QCManager) analyzePath(ctx context.Context, f FileItem) string {
 	// 不缩太小：QC 的模糊/噪点检测依赖原分辨率细节，缩太狠会漏检。
 	args := []string{abs, "-auto-orient", "-resize", "2000x2000>", "-quality", "90", tmpName}
 	cmd := exec.CommandContext(ctx, m.magick, args...)
+	// magick 要靠 MAGICK_HOME 定位同目录的配置 xml/icc（内嵌释放时尤其依赖，见 magick_embed.go）
+	cmd.Env = magickEnv(filepath.Dir(m.magick))
 	var buf bytes.Buffer
 	cmd.Stderr = &buf
 	if err := cmd.Run(); err != nil {
