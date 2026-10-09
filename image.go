@@ -108,6 +108,56 @@ func (s *ImageService) Preview(ctx context.Context, f *FileItem) (path string, o
 	return s.preview(ctx, f, true)
 }
 
+// fileExists 报告路径上是否有一个非空的常规文件。
+// 专门用来判断「预览缓存是否真的就绪」—— 只 os.Stat 存在是不够的，
+// 转码中途被杀会留下 0 字节的半成品，那不是可用的缓存。
+func fileExists(p string) bool {
+	st, err := os.Stat(p)
+	return err == nil && !st.IsDir() && st.Size() > 0
+}
+
+// QCSource 返回给 QC 检测器用的文件路径，**优先复用已有的预览缓存**。
+//
+// 为什么复用（省掉一整轮重复解码）：
+//
+//	相机 RAW（CR3/NEF/ARW…）这类文件 ffmpeg 解不开，只有 ImageMagick 能解，
+//	而解码RAW 本身就是整条链路里最贵的一步（36MB 文件、Q16 解码峰值上百 MB）。
+//	预览转码（transcodeMagick）和 QC 的analyzePath 原本**各解一遍同一个文件**，
+//	只是输出尺寸不同（预览 1600px / QC 2000px）—— 纯重复劳动。
+//
+//	现在 QC 直接拿预览缓存（1600px），省掉第二次 magick 解码。
+//	代价：QC 的 blur/noise 判据作用在 1600px 而非 2000px 上，灵敏度略降。
+//	这是可接受的 —— 那两个阈值本来就要求留 2~3 倍余量、宁漏勿滥，
+//	用略低分辨率做判据不会突然误杀大片好照片。
+//
+// 返回值语义与 analyzePath 一致：
+//   - 返回预览缓存路径 → 直接用（调用方**不要删**，那是共享缓存）；
+//   - 返回 ("", false, nil) → 该格式需要转码但转不出来（跳过，不是判损坏）；
+//   - 返回 (abs, true, nil) → 无需转码，直接用原文件（调用方**不要删**）。
+func (s *ImageService) QCSource(ctx context.Context, f *FileItem) (path string, owned bool, err error) {
+	fd, ok := formatOf(strings.ToLower(filepath.Ext(f.RelPath)))
+	if !ok || fd.Decoder != decMagick {
+		// ffmpeg 能直接解的格式：根本不需要转码，用原文件即可
+		// （视频走这条路，图片里只有 decFFmpeg 那一类）。
+		return "", false, nil
+	}
+	// 预览缓存已就绪 → 直接复用，这是省算力的主路径。
+	if p := s.outPath(f); fileExists(p) {
+		return p, false, nil
+	}
+	// 还没有预览缓存：现转一份。转完顺手**写进预览缓存**，
+	// 这样用户之后点开这张图时不用再转一次（两边各省一次）。
+	abs := s.store.absPath(f.RelPath)
+	if _, _, perr := s.preview(ctx, f, false); perr != nil {
+		return "", false, perr
+	}
+	if p := s.outPath(f); fileExists(p) {
+		return p, false, nil
+	}
+	// preview 没能产出缓存（理论上不该发生），退回原文件让 QC 尽力一试。
+	return abs, false, nil
+}
+
 // preview 是 Preview 的实现体。logFail=false 时不打印转码失败日志（预热路径用，
 // 损坏文件每进一次目录都会试一次，打日志就是刷屏；反正兜底是回退原图）。
 func (s *ImageService) preview(ctx context.Context, f *FileItem, logFail bool) (path string, orig bool, err error) {
