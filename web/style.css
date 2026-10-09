@@ -274,6 +274,13 @@ select, input[type=text] {
   position: absolute; inset: 0; pointer-events: none; z-index: 1;
   transform-origin: center center; will-change: transform;
 }
+/* 转码不了时的回退说明：播放器上方一行小字，让人知道看到的是原文件 */
+.lb-fallback-note {
+  position: absolute; top: 0; left: 0; right: 0; z-index: 3;
+  padding: 6px 10px; font-size: 12px; line-height: 1.5;
+  color: #ffe9b0; background: rgba(90,60,0,.72);
+  text-align: center; pointer-events: none;
+}
 /* 镜头脏污框：半透明红色描边 */
 .lb-dirt {
   position: absolute; box-sizing: border-box;
