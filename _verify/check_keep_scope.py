@@ -169,6 +169,7 @@ def start():
     global PROC
     lf = open(os.path.join(RUN, 'server.log'), 'w', encoding='utf-8', newline='')
     p = subprocess.Popen([EXE, '-root', MAT, '-addr', ':%d' % PORT, '-token', TOKEN,
+                          '-allow-query-token',  # harness uses ?t= query token; opt into query-token mode (real deploy defaults to reject)
                           '-db', 'v.db', '-cache', CACHE],
                          cwd=RUN, stdout=lf, stderr=subprocess.STDOUT)
     PROC = p

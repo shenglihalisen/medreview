@@ -60,6 +60,11 @@ type VideoService struct {
 
 	hub      *Hub
 	lastProc int64 // 节流：processed 事件广播至少相隔 1s
+	lastChange int64 // 节流：onChange 回调至少相隔 1s（ffmpeg 进度回调非常密集）
+	// onChange 有转码进展时回调一次（装配时接 Dashboard.Mark）。
+	// 用回调而不是直接持有 *Dashboard，是为了让 VideoService 不依赖仪表盘层 ——
+	// 两者本来是两个独立的关注点。
+	onChange func()
 }
 
 // markProcessed 标记已生成可浏览转码产物，并在成功后广播 processed 事件（供仪表盘异步刷新）。
@@ -82,6 +87,12 @@ func (v *VideoService) broadcastProcessed() {
 	}
 	if atomic.CompareAndSwapInt64(&v.lastProc, atomic.LoadInt64(&v.lastProc), now) {
 		v.hub.Broadcast("processed", map[string]any{})
+		// 仪表盘的 media/issues 区块跟着一起标脏。转码产物出现会让
+		// 「待处理媒体」减少、「转码失败」列表变化 —— 不标脏就只能等下一次
+		// 别的操作顺带推，页面上的数字会明显滞后。
+		if v.onChange != nil {
+			v.onChange()
+		}
 	}
 }
 
@@ -229,7 +240,7 @@ func findTool(name string) string {
 		dirs = append(dirs, wd)
 	}
 	for _, d := range dirs {
-		for _, sub := range [][]string{{"tools", "ffmpeg"}, {"tools", "ffmpeg", "bin"}, {"tools"}} {
+		for _, sub := range [][]string{{"tools", "ffmpeg"}, {"tools", "ffmpeg", "bin"}, {"tools", "imagemagick"}, {"tools"}} {
 			p := filepath.Join(append([]string{d}, append(sub, exe)...)...)
 			if st, err := os.Stat(p); err == nil && !st.IsDir() {
 				return p
@@ -746,6 +757,25 @@ func (v *VideoService) setJob(f *FileItem, state string, pct int, msg string) {
 		j.msg = msg
 	}
 	v.mu.Unlock()
+	v.notifyChange()
+}
+
+// notifyChange 告诉仪表盘「转码相关数据可能变了」。
+//
+// 单独抽出来是因为它必须**限流**：ffmpeg 的进度回调在转码期间非常密集
+// （实测每秒能触发几十次），不加限制会把 SSE 事件流灌爆、把 1.5 秒的
+// vtrans 限流直接顶穿，页面反而卡住。1 秒一次足够让进度条看起来是连续动的。
+func (v *VideoService) notifyChange() {
+	if v.onChange == nil {
+		return
+	}
+	now := time.Now().UnixNano()
+	if now-atomic.LoadInt64(&v.lastChange) < int64(time.Second) {
+		return
+	}
+	if atomic.CompareAndSwapInt64(&v.lastChange, atomic.LoadInt64(&v.lastChange), now) {
+		v.onChange()
+	}
 }
 
 // claimJob 把一个"排队中"的任务认领成本 worker 在跑。
@@ -825,12 +855,84 @@ type WarmupState struct {
 	StartedAt  int64  `json:"startedAt"`
 	FinishedAt int64  `json:"finishedAt"`
 	ElapsedMs  int64  `json:"elapsedMs"`
+	// Files 逐个视频的转码状态明细（只读判定，不触发转码）。只读。
+	Files []FileTranscode `json:"files,omitempty"`
 }
 
 func (v *VideoService) Warmup() WarmupState {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	return v.warm
+}
+
+// FileTranscode 是单个视频的转码状态（给管理仪表盘列明细用）。纯只读判定，
+// 不像 Status 那样会顺手启动转码。
+type FileTranscode struct {
+	Name   string `json:"name"`
+	State  string `json:"state"`            // done / skipped / transcoding / queued / failed / pending
+	Pct    int    `json:"pct"`              // transcoding 时的进度 0-100
+	Codec  string `json:"codec"`            // 源编码
+	Msg    string `json:"msg,omitempty"`    // 失败原因
+	Source string `json:"source,omitempty"` // original / transcoded
+}
+
+// ListAll 列出库里每个视频当前的转码状态，供仪表盘"逐个文件"展示。
+// 只读：只查缓存的 probe 结果 + 产物是否存在 + 在跑的任务状态，绝不启动新转码。
+func (v *VideoService) ListAll(files []FileItem) []FileTranscode {
+	out := make([]FileTranscode, 0, len(files))
+	for i := range files {
+		f := &files[i]
+		if f.Kind != kindVideo {
+			continue
+		}
+		e := FileTranscode{Name: f.Name}
+		pi := v.probe(f) // 命中缓存就是纯读；未探测过的这里会真跑一次 ffprobe
+		e.Codec = pi.codec
+		if !pi.ok {
+			e.State = "failed"
+			e.Msg = pi.err
+			out = append(out, e)
+			continue
+		}
+		if isBrowserPlayable(pi.codec, pi.acodec) {
+			e.State = "skipped"
+			e.Source = "original"
+			out = append(out, e)
+			continue
+		}
+		// 需要转码：看产物在不在
+		if st, err := os.Stat(v.outPath(f)); err == nil && st.Size() > 0 {
+			e.State = "done"
+			e.Pct = 100
+			e.Source = "transcoded"
+			out = append(out, e)
+			continue
+		}
+		// 没产物：看有没有在跑的任务
+		k := v.key(f)
+		v.mu.Lock()
+		j := v.jobs[k]
+		var state, msg string
+		var pct int
+		if j != nil {
+			state, pct, msg = j.state, j.pct, j.msg
+		}
+		v.mu.Unlock()
+		switch state {
+		case "failed":
+			e.State = "failed"
+			e.Msg = msg
+		case "running":
+			e.State = "transcoding"
+			e.Pct = pct
+		case "queued":
+			e.State = "queued"
+		default:
+			e.State = "pending"
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 func (v *VideoService) warmSet(fn func(*WarmupState)) {
@@ -1114,6 +1216,9 @@ func (v *VideoService) transcode(ctx context.Context, f *FileItem, pi probeInfo,
 		v.mu.Lock()
 		j.pct = p
 		v.mu.Unlock()
+		// 进度变了 → 标脏 vtrans 区块（notifyChange 内部限流 1 秒）。
+		// 这是"转码百分比实时跳动"能自动到达页面的关键：以前只有 poll 才会看到。
+		v.notifyChange()
 	}
 	if err := cmd.Wait(); err != nil {
 		// 把 ffmpeg 的真正原因也落日志：只记 "Conversion failed!" 这种没信息量的
@@ -1168,13 +1273,36 @@ func errorLine(s string) string {
 	return tailLine(s)
 }
 
-// handleVTransWarmup 给页面/排查用：预热进度（还在不在转、总共几个、转好几个）。
+// handleVTransWarmup 给页面/排查用：预热进度（还在不在转、总共几个、转好几个）
+// + 逐个视频的转码状态明细（files），供仪表盘列"哪个已完成/哪个正在转"。
+// handleVTransWarmup 转码预热状态 + 逐文件明细。
+//
+// ⚠️ 现在要过下载鉴权。以前是敞开的，而它每次调用都要 AllVideos + ListAll
+// （stat 每个视频的转码产物、对未探测的还可能 fork ffprobe）—— 一个无鉴权、
+// 可被反复触发的重计算端点，局域网里任何人打个循环就能把 CPU 和磁盘打满。
+//
+// 真正的实时性现在由 SSE 的 `dash` 区块（vtrans）承担：数据变了才推，
+// 页面不需要再靠轮询这个端点。留它是为了首屏和验收脚本/外部监控。
 func (h *Handler) handleVTransWarmup(w http.ResponseWriter, r *http.Request) {
 	if h.video == nil {
 		writeJSON(w, WarmupState{})
 		return
 	}
-	writeJSON(w, h.video.Warmup())
+	if !h.canDownload(r) {
+		http.Error(w, "当前页面无下载权限", http.StatusForbidden)
+		return
+	}
+	// 走 Dashboard 的统一计算，保证 HTTP 拉的与 SSE 推的是同一份口径。
+	if h.dash != nil {
+		writeJSON(w, h.dash.Full()["vtrans"])
+		return
+	}
+	st := h.video.Warmup()
+	// 逐文件明细：只读判定，不触发转码。探测失败的视频在 ListAll 里已按 failed 归类。
+	if vids, err := h.store.AllVideos(); err == nil {
+		st.Files = h.video.ListAll(vids)
+	}
+	writeJSON(w, st)
 }
 
 // handleVTransStatus 给前端查询：能直接播 / 正在转码(百分比) / 无法播放。
@@ -1209,8 +1337,13 @@ func (h *Handler) handleVTrans(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "文件不存在", http.StatusNotFound)
 		return
 	}
+	// 这个端点的语义是「取可播放的视频」，非视频一律 404。
+	// ⚠️ 不要在这里图省事改成 http.ServeFile(原文件) —— 那等于开一个
+	// **无需任何鉴权**的任意文件下载口：/api/files 本来就把完整 id 列表
+	// 公开给局域网（且不鉴权），攻击者只要枚举 id 就能拖走整个素材库的
+	// 原图原片，连下载口令都不用。图片预览请走 /api/media（那里有 dl=1 门禁）。
 	if f.Kind != kindVideo {
-		http.ServeFile(w, r, h.store.absPath(f.RelPath))
+		http.Error(w, "不是视频文件", http.StatusNotFound)
 		return
 	}
 	st := h.video.Status(f)

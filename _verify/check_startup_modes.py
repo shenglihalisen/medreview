@@ -108,7 +108,9 @@ def code_of(port, path, token=None, method='GET', data=None):
 def start(exe, port, extra_args, logname):
     """起一个实例，返回 (proc, server_log_text_path)。cwd=RUN，日志写到 RUN/<logname>。"""
     lf = open(os.path.join(RUN, logname), 'w', encoding='utf-8', newline='')
-    args = [exe, '-addr', ':%d' % port, '-token', TOKEN, '-db', 'v.db', '-cache', CACHE] + list(extra_args)
+    args = [exe, '-addr', ':%d' % port, '-token', TOKEN,
+            '-allow-query-token',  # harness uses ?t= query token; opt into query-token mode
+            '-db', 'v.db', '-cache', CACHE] + list(extra_args)
     p = subprocess.Popen(args, cwd=RUN, stdout=lf, stderr=subprocess.STDOUT)
     PROCS.append(p)
     for _ in range(120):

@@ -29,6 +29,7 @@ type appConfig struct {
 	cacheDir   string // 转码缓存目录
 	token      string // 下载口令，空 = 随机生成
 	openDL     bool   // 关闭下载口令校验
+	allowQueryToken bool // 允许 ?t=口令 鉴权（默认关，见 main.go 的 -allow-query-token）
 	vjobs      int    // 视频预热并发数
 	qcHW       string // QC 视频解码："cpu"=软解；"cuda"/"qsv"/"d3d11va"=只用那一条；"auto"=探测择优。对应 -qcdec
 	encHW      string // 视频转码编码："cpu"=libx264；"nvenc"/"qsv"/"amf"=只用那一个；"auto"=择优。对应 -enc
@@ -115,7 +116,7 @@ func newApp(cfg appConfig, logs *logRing, logPath string) (*app, error) {
 	if err != nil {
 		return nil, err
 	}
-	a.qc = NewQCManager(findTool("ffmpeg"), findTool("ffprobe"), cfg.cacheDir, a.store, a.hub)
+	a.qc = NewQCManager(findTool("ffmpeg"), findTool("ffprobe"), findTool("magick"), cfg.cacheDir, a.store, a.hub)
 
 	tok := cfg.token
 	if tok == "" {
@@ -132,11 +133,26 @@ func newApp(cfg appConfig, logs *logRing, logPath string) (*app, error) {
 		hub:     a.hub,
 		dlToken: tok,
 		noToken: cfg.openDL,
+		allowQueryToken: cfg.allowQueryToken,
 		logs:    logs,
 		logPath: logPath,
 		// 「有没有本地窗口」：gui / wails 版都有，console 版只有黑窗口
 		gui: buildMode != "console",
 	}
+	// 仪表盘增量推送：先建再接回调，最后启动循环。
+	// 顺序有讲究 —— 回调必须在 Start 之前接好，否则启动那一瞬的转码/QC
+	// 进展会找不到人标脏，页面要等下一次别的事件才更新。
+	a.h.dash = NewDashboard(a.h)
+	a.scanner.onChange = func() { a.h.dash.Mark(SecScan) }
+	a.videos.onChange = func() {
+		a.h.dash.Mark(SecVTrans, SecMedia, SecIssues)
+	}
+	a.qc.onChange = func() { a.h.dash.Mark(SecQC, SecIssues) }
+	// SSE 建连即刻下发全量快照：页面连上就是完整的，不用先 GET 一次 dashboard。
+	a.hub.SetOnConnect(func() any {
+		return map[string]any{"type": "snapshot", "sections": a.h.dash.Full()}
+	})
+	a.h.dash.Start()
 	// reviewURL / downloadURL / lanURLs 要等端口真正占住、拿到真实端口后才填
 
 	// 显卡选择拆成两路（2026-10-04）：转码编码与 QC 解码各问各的，互不牵连。
@@ -212,6 +228,12 @@ func (a *app) Close() {
 		a.warmCancel = nil
 	}
 	a.warmMu.Unlock()
+	// 仪表盘推送循环必须**先停**再关库：它的区块计算要查库，不先停就会在
+	// db.Close() 之后继续算，把 "sql: database is closed" 刷进日志 ——
+	// 看着像故障，其实是退出时正常收尾。
+	if a.h != nil {
+		a.h.dash.Stop()
+	}
 	if a.db != nil {
 		// 先落 CSV 再关库：库一关就查不动 review 了，而这份 CSV 是标记唯一的去处。
 		exportReviewCSV(reviewCSVMakePath(a.cfg.dbPath, a.cfg.csvPath), a.db)
@@ -269,7 +291,7 @@ func (a *app) computeURLsLocked() {
 	}
 	reviewURL := "http://" + host + "/review.html"
 	downloadURL := "http://" + host + "/download.html"
-	if !a.cfg.openDL {
+	if !a.cfg.openDL && a.cfg.allowQueryToken {
 		downloadURL += "?t=" + a.token
 	}
 
@@ -280,7 +302,7 @@ func (a *app) computeURLsLocked() {
 			}
 			reviewURL = fmt.Sprintf("http://%s:%d/review.html", sh, port)
 			downloadURL = fmt.Sprintf("http://%s:%d/download.html", sh, port)
-			if !a.cfg.openDL {
+			if !a.cfg.openDL && a.cfg.allowQueryToken {
 				downloadURL += "?t=" + a.token
 			}
 		}
@@ -307,7 +329,7 @@ func (a *app) computeURLsLocked() {
 		}
 		if len(ips) > 0 {
 			lanDLURL = fmt.Sprintf("http://%s:%d/download.html", ips[0], p)
-			if !a.cfg.openDL {
+			if !a.cfg.openDL && a.cfg.allowQueryToken {
 				lanDLURL += "?t=" + a.token
 			}
 		}
@@ -366,6 +388,8 @@ func (a *app) printBanner() {
 		log.Printf("下载页（可标记+下载）: %s", downloadURL)
 		log.Printf("下载口令: %s", a.token)
 	}
+	hubURL := strings.TrimSuffix(reviewURL, "/review.html") + "/home.html"
+	log.Printf("总入口（审阅/下载/仪表盘）: %s", hubURL)
 
 	bindHost := a.cfg.addr
 	if i := strings.LastIndex(bindHost, ":"); i >= 0 {

@@ -46,6 +46,7 @@ def token_of(port, tag):
     lf = open(logp, 'wb')
     p = subprocess.Popen(
         [EXE, '-addr', '127.0.0.1:%d' % port,
+         '-allow-query-token',  # download URL carries ?t=<token> only in query-token mode (opt-in)
          '-db', os.path.join(cwd, 't.db'), '-cache', os.path.join(cwd, 'cache')],
         cwd=cwd, stdout=lf, stderr=subprocess.STDOUT,
         creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
@@ -107,6 +108,7 @@ def main():
         lf = open(os.path.join(cwd, 'out.log'), 'wb')
         p3 = subprocess.Popen(
             [EXE, '-addr', '127.0.0.1:8143', '-token', 'myfixedpw',
+             '-allow-query-token',  # download URL carries ?t=<token> only in query-token mode (opt-in)
              '-db', os.path.join(cwd, 't.db'), '-cache', os.path.join(cwd, 'cache')],
             cwd=cwd, stdout=lf, stderr=subprocess.STDOUT,
             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))

@@ -105,7 +105,39 @@ func openDB(path string) (*sql.DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("补列失败: %w", err)
 	}
+	if err := normalizeClaimTimestamps(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("认领时间戳归一失败: %w", err)
+	}
 	return db, nil
+}
+
+// normalizeClaimTimestamps 把 claim.claimed_at 统一成**毫秒**。
+//
+// 背景：老版本写的是 Unix() 秒，新代码（RenewClaims / ForceReleaseStale /
+// 仪表盘的僵尸认领判定）一律按 UnixMilli() 毫秒读。两边单位不一致的后果很隐蔽：
+// 一个 2026 年的秒级时间戳（≈1.78e9）被当成毫秒去和"现在减 30 分钟"（≈1.78e12）比，
+// 结果是**每一个老认领都判定为僵尸**，页面上一片"强制释放"。
+//
+// 判据：Unix 毫秒时间戳在 2001 年 9 月之前不会超过 1e12；秒级则永远小于 1e11。
+// 所以用 1e12 做阈值足够宽松，不会误伤正常的秒级数据。
+func normalizeClaimTimestamps(db *sql.DB) error {
+	// 先看一眼有没有需要转的行；没有就别写（WAL 模式下无谓的写会触发 checkpoint）。
+	var n int64
+	if err := db.QueryRow(`SELECT COUNT(*) FROM claim WHERE claimed_at > 0 AND claimed_at < ?`,
+		1_000_000_000_000).Scan(&n); err != nil {
+		return err
+	}
+	if n == 0 {
+		return nil
+	}
+	if _, err := db.Exec(
+		`UPDATE claim SET claimed_at = claimed_at * 1000 WHERE claimed_at > 0 AND claimed_at < ?`,
+		1_000_000_000_000); err != nil {
+		return err
+	}
+	log.Printf("认领时间戳归一：%d 条由秒换算为毫秒", n)
+	return nil
 }
 
 // wipeDB 把整库清干净：主文件 + WAL + shm 三件套一起删。

@@ -7,285 +7,894 @@
 <link rel="icon" href="data:,">
 <link rel="stylesheet" href="/style.css">
 <style>
-/* 仪表盘布局：沿用 review.html 的配色变量（来自 style.css 的 :root），这里只定义排布。
-   注意：所有 class 统一加 d 前缀，避免与 style.css 里已有的 .card/.bar/.on 等规则冲突
-   （那些是审阅画廊卡片的样式，会用到 position:absolute，套到仪表盘上就会把元素叠在一起）。 */
-* { box-sizing: border-box; }
-html, body { margin: 0; }
-body {
-  background: var(--bg);
+/* 仪表盘：完全独立的根容器 id="dash"。
+   ⚠️ 绝不能沿用 id="app" —— style.css 里给审阅页的 #app 写了
+   `display:flex; height:100vh; overflow:hidden`，一旦撞名，
+   本页所有顶层块会变成并排 flex item 并被限高，表现为"表头缩在左边/挤成一团"。
+   配色沿用 style.css 的 :root 变量；class 一律加 d 前缀避开画廊卡片样式(.card/.bar/.on 等会 position:absolute)。 */
+html, body { margin: 0; padding: 0; background: var(--bg); }
+#dash {
+  width: 100%;
+  min-height: 100vh;
+  padding: 0 0 40px;
   color: var(--text);
   font: 14px/1.5 "Microsoft YaHei", "PingFang SC", "Segoe UI", system-ui, sans-serif;
+  display: block;                 /* 明确 block，杜绝继承 #app 的 flex */
 }
-#app { max-width: 1120px; margin: 0 auto; padding: 20px 20px 48px; }
 
+/* ===== 顶部通栏蓝色表头（贴顶、横贯整个屏幕） ===== */
 .dhead {
-  display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
-  padding: 4px 2px 16px;
+  width: 100%;
+  display: flex; align-items: center; gap: 18px;
+  padding: 18px 28px;
+  background: linear-gradient(100deg, var(--primary) 0%, #6d5cf5 100%);
+  color: #fff;
 }
-.dhead h1 { font-size: 20px; margin: 0; font-weight: 700; letter-spacing: .5px; }
-.dhead .dsub { color: var(--text-faint); font-size: 12.5px; }
-.dhead .dspacer { flex: 1; }
-.dhead .ddot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-faint); display: inline-block; margin-right: 6px; vertical-align: middle; }
-.dhead .ddot.ok { background: var(--keep); }
-.dhead .ddot.err { background: var(--reject); }
+/* 表头左侧「← 入口」返回按钮（半透明白，符合蓝色条风格） */
+.dhome {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: rgba(255,255,255,.16); color: #fff;
+  text-decoration: none; font-size: 13.5px; font-weight: 600;
+  padding: 8px 14px; border-radius: 999px; flex-shrink: 0;
+  transition: background .15s ease;
+}
+.dhome:hover { background: rgba(255,255,255,.28); }
+.dhead .dbrand { display: flex; align-items: baseline; gap: 14px; min-width: 0; }
+.dhead h1 { font-size: 21px; margin: 0; font-weight: 700; letter-spacing: .5px; color: #fff; }
+.dhead .dsub { font-size: 13px; color: rgba(255,255,255,.82); }
+.dhead .dspacer { flex: 1 1 auto; }
+.dconn {
+  display: flex; align-items: center; gap: 8px; font-size: 13px;
+  background: rgba(255,255,255,.15); padding: 7px 15px; border-radius: 999px; flex-shrink: 0;
+}
+.dconn .ddot { width: 9px; height: 9px; border-radius: 50%; background: #fff; }
+.dconn .ddot.ok { background: #7ef0a4; }
+.dconn .ddot.err { background: #ffc4c4; }
 
-.dsection { margin-top: 22px; }
-.dsection > .dtitle {
-  font-size: 13px; font-weight: 600; color: var(--text-dim);
-  margin: 0 2px 10px; display: flex; align-items: center; gap: 8px;
-}
-.dsection > .dtitle::before {
-  content: ""; width: 3px; height: 13px; border-radius: 2px; background: var(--primary); display: inline-block;
-}
-
-.dgrid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
-.dcard {
-  background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
-  padding: 14px 16px; min-height: 84px; display: flex; flex-direction: column; justify-content: center;
-}
-.dcard .dlabel { font-size: 12.5px; color: var(--text-dim); }
-.dcard .dnum { font-size: 30px; font-weight: 700; line-height: 1.15; margin-top: 4px; }
-.dcard .dnote { font-size: 11.5px; color: var(--text-faint); margin-top: 2px; }
-.dcard.daccent .dnum { color: var(--primary); }
-.dcard.dkeep .dnum { color: var(--keep); }
-.dcard.dreject .dnum { color: var(--reject); }
-.dcard.dwarn .dnum { color: var(--warn); }
-
-.dbar { height: 6px; border-radius: 4px; background: #eef0f3; overflow: hidden; margin-top: 10px; }
-.dbar > span { display: block; height: 100%; background: var(--primary); transition: width .4s ease; }
-.dbar.dkeep > span { background: var(--keep); }
-
-.dchips { display: flex; flex-wrap: wrap; gap: 8px; }
-.dchip {
-  font-size: 12.5px; font-weight: 600; padding: 5px 11px; border-radius: 999px;
-  color: #1a1a1a; background: #eceef1;
-}
-.dchip.dzero { opacity: .42; }
-.dchip.ddup { background: #ffd54a; }
-.dchip.dcorrupt { background: #ff9d3a; }
-.dchip.dblank { background: #ffe08a; }
-.dchip.ddirt { background: #ff5a5a; color: #fff; }
-.dchip.dblur { background: #b98cff; }
-.dchip.dexposure { background: #4fd1e0; }
-.dchip.dnoise { background: #9aa0b5; color: #fff; }
-.dchip.dshake { background: #7fe3a8; }
-
-.dworkers { display: flex; flex-direction: column; gap: 8px; }
-.dworker {
-  display: flex; align-items: center; gap: 10px;
-  background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
-  padding: 9px 14px;
-}
-.dworker .davatar {
-  width: 30px; height: 30px; border-radius: 50%; background: var(--primary-soft); color: var(--primary);
-  display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 13px; flex-shrink: 0;
-}
-.dworker .dnm { font-weight: 600; }
-.dworker .don { color: var(--text-faint); font-size: 12.5px; }
-.dworker .don b { color: var(--warn); font-weight: 600; }
-.dempty { color: var(--text-faint); font-size: 13px; padding: 8px 2px; }
-
+/* 扫描状态条（表头正下方，通栏） */
 .dbanner {
-  background: var(--warn-soft); color: var(--warn); border: 1px solid #f0dcb8;
-  border-radius: var(--radius); padding: 9px 14px; font-size: 13px; margin: 2px 2px 0;
+  width: 100%;
+  background: var(--warn-soft); color: var(--warn);
+  padding: 9px 28px; font-size: 13.5px;
+  border-bottom: 1px solid #f0dcb8;
 }
-.dbanner.ok { background: var(--keep-soft); color: var(--keep); border-color: #b9e3c9; }
+.dbanner.ok { background: var(--keep-soft); color: var(--keep); border-color: #bfe3cd; }
+.dbanner[style*="none"] { display: none; }
+
+/* ===== 主体：一条内容带，纵向滚动，所有区块横向排列 ===== */
+.dmain { width: 100%; padding: 22px 28px 0; }
+
+/* KPI 一行横排：每张 flex:1，宽度由浏览器分配 */
+.dkpis { display: flex; flex-wrap: wrap; gap: 16px; }
+.ktile {
+  flex: 1 1 0; min-width: 140px;                 /* 0 而不是 168px：等宽平分，不因内容长短不一而错位 */
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 14px; padding: 16px 18px;
+  display: flex; align-items: center; gap: 14px;
+}
+.ktile .kicon {
+  width: 42px; height: 42px; border-radius: 11px; flex-shrink: 0;
+  display: grid; place-items: center; color: #fff;
+}
+.ktile .kicon svg { width: 22px; height: 22px; }
+.ktile .kinfo { display: flex; flex-direction: column; min-width: 0; }
+.ktile .klabel { font-size: 12.5px; color: var(--text-dim); white-space: nowrap; }
+.ktile .knum { font-size: 28px; font-weight: 700; line-height: 1.15; }
+.ktile .knote { font-size: 11.5px; color: var(--text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* 一个通用区块：一个通栏 panel */
+.dblock {
+  margin-top: 20px;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 14px; padding: 18px 22px;
+}
+.dbhead {
+  display: flex; align-items: baseline; gap: 12px;
+  font-size: 14px; font-weight: 600; color: var(--text);
+  margin: 0 0 14px;
+}
+.dbhead .dbmeta { font-size: 12.5px; font-weight: 400; color: var(--text-faint); margin-left: auto; }
+
+/* 质量概况：每种检测一行，横向条 */
+.drows { display: flex; flex-direction: column; gap: 10px; }
+.drow { display: flex; align-items: center; gap: 14px; }
+.drow .dl { width: 86px; font-size: 13px; color: var(--text-dim); flex-shrink: 0; }
+.drow .dbar { flex: 1 1 auto; height: 10px; background: #eef0f3; border-radius: 5px; overflow: hidden; }
+.drow .dbar > i { display: block; height: 100%; border-radius: 5px; transition: width .4s ease; }
+.drow .dv { width: 44px; text-align: right; font-size: 13.5px; font-weight: 600; flex-shrink: 0; }
+
+/* 转码情况：数字格子横排 + 进度条 */
+.dvtbar { height: 9px; background: #eef0f3; border-radius: 5px; overflow: hidden; margin-bottom: 14px; }
+.dvtbar > i { display: block; height: 100%; background: var(--primary); border-radius: 5px; transition: width .4s ease; }
+.dvtnow { font-size: 12.5px; color: var(--text-faint); margin: -6px 0 14px; white-space: pre-line; max-height: 150px; overflow-y: auto; }
+.dvtgrid { display: flex; flex-wrap: wrap; gap: 12px; }
+.dvtcell {
+  flex: 1 1 0; min-width: 96px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 11px;
+  padding: 12px 8px; text-align: center;
+}
+.dvtcell .n { font-size: 22px; font-weight: 700; line-height: 1.15; }
+.dvtcell .l { font-size: 12px; color: var(--text-dim); margin-top: 3px; }
+.dvtcell.ok .n { color: var(--keep); }
+.dvtcell.warn .n { color: var(--warn); }
+.dvtcell.bad .n { color: var(--reject); }
+
+/* 目录认领：横向大进度条 + 数字 */
+.dfold { display: flex; align-items: center; gap: 18px; }
+.dfold .dnum { display: flex; align-items: baseline; gap: 6px; flex-shrink: 0; }
+.dfold .dnum b { font-size: 24px; }
+.dfold .dnum span { font-size: 12.5px; color: var(--text-dim); }
+.dfold .dbar { flex: 1 1 auto; height: 12px; background: #eef0f3; border-radius: 6px; overflow: hidden; }
+.dfold .dbar > i { display: block; height: 100%; background: var(--keep); transition: width .4s ease; }
+.dfold .dtot { font-size: 12.5px; color: var(--text-faint); flex-shrink: 0; }
+
+/* 在岗人员：横向 chip */
+.dwl { display: flex; flex-wrap: wrap; gap: 12px; }
+.dchip {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 999px;
+  padding: 8px 16px 8px 8px;
+}
+.dchip .da {
+  width: 30px; height: 30px; border-radius: 50%; background: var(--primary-soft); color: var(--primary);
+  display: grid; place-items: center; font-weight: 700; font-size: 13px; flex-shrink: 0;
+}
+.dchip .dn { font-weight: 600; }
+.dchip .dd { font-size: 12.5px; color: var(--text-faint); }
+.dchip .dd b { color: var(--warn); }
+.dempty { color: var(--text-faint); font-size: 13px; padding: 4px 2px; }
+
+/* 错误报告：表格式列出失败文件 */
+.derr { display: flex; flex-direction: column; gap: 8px; }
+.derr .drow2 {
+  display: flex; align-items: center; gap: 14px;
+  background: var(--reject-soft);      /* 淡红底 */
+  border: 1px solid #f5c6c6;
+  border-radius: 10px; padding: 10px 14px;
+}
+.derr .drow2 .dfname { font-weight: 600; color: var(--reject); flex-shrink: 0; min-width: 180px; word-break: break-all; }
+.derr .drow2 .dreason { color: var(--text-dim); font-size: 13px; }
+.derr .ok { color: var(--keep); font-size: 13px; padding: 4px 2px; }
+.derr .dheadrow {
+  display: flex; gap: 14px; font-size: 12px; color: var(--text-faint);
+  padding: 0 4px 2px; border-bottom: 1px solid var(--border);
+}
+.derr .dheadrow .dfname { min-width: 180px; }
+
+/* ===== 僵尸认领 ===== */
+.dstale { margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--border); }
+.dstalehead { font-size: 12.5px; color: var(--warn); margin-bottom: 8px; font-weight: 600; }
+.dstalerow { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 13px; }
+.dstaleuser { font-weight: 600; color: var(--text); }
+.dstaleidle { color: var(--text-faint); font-size: 12.5px; }
+.dstalemore { color: var(--text-faint); font-size: 12.5px; }
+.drelease {
+  font: inherit; font-size: 12.5px; cursor: pointer;
+  background: var(--reject-soft); color: var(--reject);
+  border: 1px solid #f5c6c6; border-radius: 999px; padding: 5px 14px;
+  transition: all .14s ease;
+}
+.drelease:hover { background: var(--reject); color: #fff; }
+
+/* ===== 工具条：搜索框 / 筛选 chip / 排序下拉 ===== */
+.dtoolbar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin: 14px 0 10px;
+}
+.dsep { width: 1px; height: 18px; background: var(--border-strong); flex-shrink: 0; }
+.dinput {
+  font: inherit; font-size: 13px; color: var(--text);
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: 8px; padding: 6px 11px; min-width: 150px;
+}
+.dinput:focus { outline: none; border-color: var(--primary); }
+select.dinput { cursor: pointer; }
+.dchipbtn {
+  font: inherit; font-size: 12.5px; cursor: pointer;
+  background: var(--bg); color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 999px;
+  padding: 5px 13px; transition: all .14s ease;
+}
+.dchipbtn:hover { border-color: var(--primary); color: var(--primary); }
+.dchipbtn.on { background: var(--primary); border-color: var(--primary); color: #fff; font-weight: 600; }
+
+/* ===== 转码逐文件清单 ===== */
+.vtlist { display: flex; flex-direction: column; gap: 4px; max-height: 420px; overflow-y: auto; }
+.vtlist .dheadrow, .vtrow {
+  display: grid; grid-template-columns: 84px 1fr 130px 62px;
+  gap: 12px; align-items: center;
+}
+.vtlist .dheadrow { position: sticky; top: 0; background: var(--panel); z-index: 2; padding: 6px 4px; }
+.vtrow {
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px 10px; font-size: 13px;
+}
+.vtrow:hover { border-color: var(--border-strong); }
+.vtst {
+  display: inline-block; text-align: center;
+  font-size: 11.5px; font-weight: 600; border-radius: 999px; padding: 3px 0;
+  background: #eef0f3; color: var(--text-dim);
+}
+.vtst.s-failed     { background: var(--reject-soft); color: var(--reject); }
+.vtst.s-transcoding{ background: #e5edff; color: #2f5fd0; }
+.vtst.s-queued     { background: #f0eaff; color: #6d4fd0; }
+.vtst.s-pending    { background: var(--warn-soft); color: var(--warn); }
+.vtst.s-done       { background: var(--keep-soft); color: var(--keep); }
+.vtst.s-skipped    { background: #eef0f3; color: var(--text-dim); }
+.vtname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vtcodec { font-size: 12px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vtpct { text-align: right; font-size: 12.5px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+
+/* ===== 异常中心：类型徽标 + warn 行 ===== */
+.derr .drow2.warn { background: var(--warn-soft); border-color: #f0dcb8; }
+.derr .drow2.warn .dfname { color: var(--warn); }
+.dkind {
+  flex-shrink: 0; width: 74px; font-size: 11.5px; font-weight: 600;
+  color: var(--text-dim); text-align: center;
+  background: rgba(0,0,0,.045); border-radius: 999px; padding: 3px 0;
+}
+.derr .dheadrow .dkind { width: 74px; background: none; }
+
+/* ===== 运行状态 ===== */
+.dhealth { display: flex; gap: 10px; flex-wrap: wrap; }
+.hbit {
+  font-size: 12.5px; border-radius: 999px; padding: 6px 14px;
+  border: 1px solid var(--border); background: var(--bg);
+}
+.hbit.ok  { color: var(--keep); border-color: #bfe3cd; background: var(--keep-soft); }
+.hbit.bad { color: var(--reject); border-color: #f5c6c6; background: var(--reject-soft); }
+
+/* ===== 悬停详情气泡（纯 CSS：data-tip + ::after） =====
+   给任意元素加 data-tip="多行文本(用 \n 分隔)" 即可。悬停时弹出白底小窗，
+   与整体白卡片风格一致（深色文字 + 浅边框 + 轻投影）。 */
+[data-tip] { position: relative; cursor: default; }
+[data-tip]:hover::after {
+  content: attr(data-tip);
+  position: absolute; left: 50%; bottom: calc(100% + 8px);
+  transform: translateX(-50%) translateY(4px);
+  background: var(--panel);            /* 白底，跟整体风格一致 */
+  color: var(--text);                   /* 深色文字 */
+  border: 1px solid var(--border-strong);
+  font-size: 12.5px; font-weight: 400; line-height: 1.6;
+  white-space: pre;                 /* 保留 \n 换行 */
+  padding: 10px 14px; border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0,0,0,.12);
+  opacity: 0; pointer-events: none;
+  transition: opacity .15s ease, transform .15s ease;
+  z-index: 50;
+}
+[data-tip]:hover::after { opacity: 1; transform: translateX(-50%) translateY(0); }
+/* tooltip 本身要能撑多行 + 长文件名换行 */
+[data-tip]:hover::after { max-width: 340px; white-space: pre-wrap; word-break: break-all; }
+
+/* 顶部贴边（KPI 行在表头下，tooltip 向上弹会顶出视口，这几个改向下弹） */
+.dblock [data-tip]:hover::after,
+.dkpis [data-tip]:hover::after { bottom: auto; top: calc(100% + 8px); transform: translateX(-50%) translateY(-4px); }
+.dblock [data-tip]:hover::after,
+.dkpis [data-tip]:hover::after { transform: translateX(-50%) translateY(0); }
 </style>
 </head>
 <body>
-<div id="app">
+<div id="dash">
+  <!-- 顶部通栏表头 -->
   <div class="dhead">
-    <h1>管理仪表盘</h1>
-    <span class="dsub">素材审阅 · 实时态势</span>
+    <a class="dhome" href="/home.html" title="返回入口页">← 入口</a>
+    <div class="dbrand">
+      <h1>素材审阅 · 管理仪表盘</h1>
+      <span class="dsub">实时态势总览</span>
+    </div>
     <span class="dspacer"></span>
-    <span class="dsub"><span class="ddot" id="dot"></span><span id="updated">连接中…</span></span>
+    <div class="dconn"><span class="ddot" id="dot"></span><span id="updated">连接中…</span></div>
   </div>
-
   <div id="banner" class="dbanner" style="display:none"></div>
 
-  <div class="dsection">
-    <div class="dtitle">总览</div>
-    <div class="dgrid" id="overview"></div>
-  </div>
+  <!-- 主体内容带 -->
+  <div class="dmain">
+    <div class="dkpis" id="kpis"></div>
 
-  <div class="dsection">
-    <div class="dtitle">媒体构成</div>
-    <div class="dgrid" id="media"></div>
-  </div>
+    <div class="dblock">
+      <div class="dbhead">质量概况 <span class="dbmeta" id="qc-meta"></span></div>
+      <div class="drows" id="qc"></div>
+    </div>
 
-  <div class="dsection">
-    <div class="dtitle">目录认领</div>
-    <div class="dgrid" id="folders"></div>
-  </div>
+    <div class="dblock">
+      <div class="dbhead">转码情况 <span class="dbmeta" id="vt-meta"></span></div>
+      <div id="vtprog">
+        <div class="dvtbar"><i id="vtfill"></i></div>
+        <div class="dvtnow" id="vtnow"></div>
+      </div>
+      <div class="dvtgrid" id="vtgrid"></div>
+      <div class="dtoolbar">
+        <input id="vtq" class="dinput" type="search" placeholder="搜索文件名…" autocomplete="off">
+        <span class="dsep"></span>
+        <button class="dchipbtn on" data-vt="">全部</button>
+        <button class="dchipbtn" data-vt="failed">失败</button>
+        <button class="dchipbtn" data-vt="transcoding">转码中</button>
+        <button class="dchipbtn" data-vt="queued">排队中</button>
+        <button class="dchipbtn" data-vt="pending">待转码</button>
+        <button class="dchipbtn" data-vt="done">已转码</button>
+        <button class="dchipbtn" data-vt="skipped">可直接播</button>
+        <span class="dsep"></span>
+        <select id="vtsort" class="dinput">
+          <option value="smart">智能排序（问题优先）</option>
+          <option value="name">按文件名</option>
+          <option value="pct">按进度（低→高）</option>
+          <option value="state">按状态</option>
+        </select>
+      </div>
+      <div class="vtlist" id="vtlist"></div>
+    </div>
 
-  <div class="dsection">
-    <div class="dtitle">在岗人员</div>
-    <div class="dworkers" id="workers"></div>
-  </div>
+    <div class="dblock">
+      <div class="dbhead">目录认领</div>
+      <div class="dfold" id="folders"></div>
+    </div>
 
-  <div class="dsection">
-    <div class="dtitle">质量概况（自动检测）</div>
-    <div class="dchips" id="qc"></div>
+    <div class="dblock">
+      <div class="dbhead">在岗人员 <span class="dbmeta" id="wk-meta"></span></div>
+      <div class="dwl" id="workers"></div>
+    </div>
+
+    <div class="dblock" id="issblock">
+      <div class="dbhead">
+        异常中心 <span class="dbmeta" id="iss-meta"></span>
+      </div>
+      <div class="dtoolbar">
+        <button class="dchipbtn on" data-ik="">全部</button>
+        <button class="dchipbtn" data-ik="transcode">转码失败</button>
+        <button class="dchipbtn" data-ik="missing">素材丢失</button>
+        <button class="dchipbtn" data-ik="scan">扫描错误</button>
+        <button class="dchipbtn" data-ik="qc">质量问题</button>
+        <span class="dsep"></span>
+        <button class="dchipbtn" id="iss-only-err">只看错误</button>
+      </div>
+      <div id="issues"></div>
+    </div>
+
+    <div class="dblock">
+      <div class="dbhead">运行状态</div>
+      <div class="dhealth" id="health"></div>
+    </div>
   </div>
 </div>
 
 <script>
-// 数据刷新改为事件流驱动（见底部 connectEvents），不再固定轮询。
+// 事件流驱动刷新（非轮询），见底部 connectEvents。
 const $ = (id) => document.getElementById(id);
 
-function card(label, num, opts) {
-  opts = opts || {};
-  const cls = ["dcard"];
-  if (opts.cls) cls.push(opts.cls);
-  let html = `<div class="${cls.join(' ')}">`;
-  html += `<div class="dlabel">${label}</div>`;
-  html += `<div class="dnum">${fmt(num)}</div>`;
-  if (opts.note) html += `<div class="dnote">${opts.note}</div>`;
-  if (opts.bar !== undefined) {
-    const pct = opts.barTotal > 0 ? Math.round(opts.bar / opts.barTotal * 100) : 0;
-    html += `<div class="dbar ${opts.barCls || ''}"><span style="width:${pct}%"></span></div>`;
-    html += `<div class="dnote">${pct}%</div>`;
-  }
-  html += `</div>`;
-  return html;
-}
+const ICON = {
+  folder: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>',
+  check:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13l4 4L19 7"/></svg>',
+  clock:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>',
+  image:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9.5" r="1.5"/><path d="M21 16l-5-5L5 20"/></svg>',
+  film:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="8" y1="4" x2="8" y2="20"/><line x1="16" y1="4" x2="16" y2="20"/></svg>',
+  refresh:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg>',
+  users:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3"/><path d="M3 20a6 6 0 0 1 12 0"/><path d="M16 6a3 3 0 0 1 0 6"/><path d="M21 20a6 6 0 0 0-4-5.6"/></svg>',
+  tag:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l8-8 9 9-8 8z"/><circle cx="8" cy="8" r="1.4"/></svg>',
+  edit:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>',
+};
+
+const QC_COLOR = {
+  dup:'#f5c518', corrupt:'#ff9d3a', blank:'#ffd166', dirt:'#ff5a5a',
+  blur:'#b98cff', exposure:'#4fd1e0', noise:'#9aa0b5', shake:'#7fe3a8',
+};
+const QC_DEFS = [
+  ['dup','重复'], ['corrupt','损坏'], ['blank','空镜'], ['dirt','镜头脏污'],
+  ['blur','模糊'], ['exposure','曝光异常'], ['noise','噪点'], ['shake','抖动'],
+];
 
 function fmt(n) { return (n == null ? 0 : n).toLocaleString('zh-CN'); }
-
-function renderOverview(t) {
-  const html = [
-    card("总文件", t.files, { cls: "daccent" }),
-    card("已审阅", t.files - t.pending, { cls: "dkeep", note: "保留 " + fmt(t.keep) + " · 不保留 " + fmt(t.reject) }),
-    card("未审阅", t.pending, { cls: "dwarn" }),
-    card("保留", t.keep, { cls: "dkeep" }),
-    card("不保留", t.reject, { cls: "dreject" }),
-  ];
-  $("overview").innerHTML = html.join("");
+function pct(a, b) { return b > 0 ? Math.round(a / b * 100) + '%' : '0%'; }
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
 }
 
-function renderMedia(m) {
-  const html = [
-    card("照片", m.photo, {}),
-    card("视频", m.video, {}),
-    card("待处理媒体", m.processedPending, { cls: "dwarn", note: "尚未生成可浏览预览",
-      bar: m.processedDone, barTotal: m.processedDone + m.processedPending }),
-    card("已处理媒体", m.processedDone, { cls: "dkeep", note: "已生成预览/转码",
-      bar: m.processedDone, barTotal: m.processedDone + m.processedPending, barCls: "dkeep" }),
-  ];
-  $("media").innerHTML = html.join("");
+function tile(o) {
+  return `<div class="ktile"${o.tip ? ` data-tip="${o.tip}"` : ''}>
+    <div class="kicon" style="background:${o.c}">${o.i}</div>
+    <div class="kinfo">
+      <div class="klabel">${o.l}</div>
+      <div class="knum" style="color:${o.c}">${fmt(o.n)}</div>
+      ${o.note ? `<div class="knote">${o.note}</div>` : ''}
+    </div>
+  </div>`;
 }
 
-function renderFolders(f) {
-  const html = [
-    card("目录总数", f.total, { cls: "daccent" }),
-    card("已认领", f.claimed, { cls: "dkeep",
-      bar: f.claimed, barTotal: f.total }),
-    card("未认领", f.unclaimed, { cls: "dwarn",
-      bar: f.unclaimed, barTotal: f.total }),
-  ];
-  $("folders").innerHTML = html.join("");
+// KPI 卡片横跨多个区块（总数看 totals、照片/视频看 media、认领看 folders、
+// 人数看 workers），所以任何一块变了都要把这排卡片重画一次。
+// 代价很小（9 张卡片的 innerHTML），换来的是不必去追踪跨区块的依赖关系。
+function renderKPIs() {
+  const t = SECTIONS.totals || {}, m = SECTIONS.media || {},
+        f = SECTIONS.folders || {}, w = SECTIONS.workers || {};
+  const reviewed = (t.files || 0) - (t.pending || 0);
+  $('kpis').innerHTML = [
+    { i: ICON.folder, c:'var(--primary)', l:'总文件', n:t.files,
+      note:'保留 '+fmt(t.keep)+' · 不保留 '+fmt(t.reject),
+      tip:`素材库中的文件总数\n照片 ${fmt(m.photo)} · 视频 ${fmt(m.video)}\n保留 ${fmt(t.keep)} · 不保留 ${fmt(t.reject)} · 待定 ${fmt(t.pending)}` },
+    { i: ICON.check, c:'var(--keep)', l:'已审阅', n:reviewed,
+      note:'占比 '+pct(reviewed,t.files),
+      tip:`已完成标记（保留 + 不保留）\n已审阅 ${fmt(reviewed)} / ${fmt(t.files)}\n占比 ${pct(reviewed, t.files)}\n待审阅 ${fmt(t.pending)}` },
+    { i: ICON.clock, c:'var(--warn)', l:'待审阅', n:t.pending,
+      tip:`尚未给出保留判断的文件\n待审阅 ${fmt(t.pending)} 个\n占总数 ${pct(t.pending, t.files)}` },
+    { i: ICON.image, c:'var(--primary)', l:'照片', n:m.photo,
+      tip:`图片文件数 ${fmt(m.photo)}\n已生成预览 ${fmt(m.processedDone)}\n待处理 ${fmt(m.processedPending)}` },
+    { i: ICON.film, c:'#0ea5e9', l:'视频', n:m.video,
+      tip:`视频文件数 ${fmt(m.video)}\n（每支视频的转码进度见下方「转码情况」）` },
+    { i: ICON.refresh, c:'var(--warn)', l:'待处理媒体', n:m.processedPending,
+      note:'未生成预览',
+      tip:`尚未生成可浏览预览的媒体\n待处理 ${fmt(m.processedPending)}\n已处理 ${fmt(m.processedDone)}\n完成率 ${pct(m.processedDone, m.processedDone + m.processedPending)}` },
+    { i: ICON.users, c:'var(--primary)', l:'在岗总人数', n:w.count,
+      note:'近 5 分钟活跃',
+      tip:`当前在岗 ${fmt(w.count)} 人\n（在岗 = 认领了目录，或近 5 分钟有审阅动作）\n其中正在审阅 ${fmt(w.reviewing || 0)} 人` },
+    { i: ICON.edit, c:'var(--keep)', l:'正在审阅', n:(w.reviewing || 0),
+      note:'已认领目录',
+      tip:`正在审阅 ${fmt(w.reviewing || 0)} 人\n（已认领目录、正在实际标记的人）\n在岗总人数 ${fmt(w.count)} 人` },
+    { i: ICON.tag, c:'#8b5cf6', l:'目录认领', n:f.claimed,
+      note:(f.stale ? fmt(f.stale)+' 个僵尸' : '共 '+fmt(f.total)+' 个'),
+      tip:`目录认领情况\n已认领 ${fmt(f.claimed)} · 未认领 ${fmt(f.unclaimed)}\n共 ${fmt(f.total)} 个目录` +
+          (f.stale ? `\n其中 ${fmt(f.stale)} 个已超过 30 分钟无动作（僵尸认领，可强制释放）` : '') },
+  ].map(tile).join('');
 }
 
-function renderWorkers(w) {
-  const box = $("workers");
+function renderQC() {
+  const qc = SECTIONS.qc;
+  const box = $('qc'), meta = $('qc-meta');
+  if (!qc || !qc.total) { box.innerHTML = `<div class="dempty">尚无质量检测记录</div>`; meta.textContent = ''; return; }
+  meta.textContent = '已检测 ' + fmt(qc.total) + ' 个';
+  const max = Math.max(1, ...QC_DEFS.map(([k]) => qc[k] || 0));
+  box.innerHTML = QC_DEFS.map(([k, label]) => {
+    const n = qc[k] || 0;
+    const share = pct(n, qc.total);
+    return `<div class="drow" data-tip="${label}：${fmt(n)} 个\n占已检测 ${share}（共 ${fmt(qc.total)} 个）">
+      <div class="dl">${label}</div>
+      <div class="dbar"><i style="width:${Math.round(n / max * 100)}%;background:${QC_COLOR[k]}"></i></div>
+      <div class="dv">${fmt(n)}</div>
+    </div>`;
+  }).join('');
+}
+
+// 转码情况：来自 /api/vtrans-warmup
+function vtcell(n, label, cls, tip) {
+  return `<div class="dvtcell ${cls}"${tip ? ` data-tip="${tip}"` : ''}><div class="n">${fmt(n)}</div><div class="l">${label}</div></div>`;
+}
+const VT_STATE_LABEL = {
+  done: '已完成', skipped: '可直接播', transcoding: '转码中',
+  queued: '排队中', failed: '失败', pending: '待转码',
+};
+// 把 files 明细按状态分组，拼成多行 tooltip 文本
+function vtDetail(files, wantState) {
+  const names = (files || []).filter(f => f.state === wantState).map(f => f.name);
+  if (!names.length) return '';
+  const show = names.slice(0, 12);
+  let s = show.map(esc).join('\n');
+  if (names.length > show.length) s += `\n…共 ${names.length} 个`;
+  return s;
+}
+function renderVTrans() {
+  const vt = SECTIONS.vtrans;
+  const prog = $('vtprog'), grid = $('vtgrid'), meta = $('vt-meta');
+  if (!vt || !vt.total) {
+    prog.style.display = 'none'; meta.textContent = '';
+    grid.innerHTML = `<div class="dempty">本轮没有需要预转码的视频</div>`;
+    return;
+  }
+  meta.textContent = vt.active ? '进行中' : (vt.finishedAt ? '已结束' : '待开始');
+  if (vt.active) {
+    const p = vt.total > 0 ? Math.round(vt.probed / vt.total * 100) : 0;
+    prog.style.display = 'block';
+    $('vtfill').style.width = p + '%';
+    $('vtnow').textContent = (vt.current ? '正在处理：' + esc(vt.current) : '准备中…')
+      + `　已探测 ${fmt(vt.probed)}/${fmt(vt.total)}（${p}%）`;
+  } else {
+    prog.style.display = 'none';
+  }
+  const F = vt.files || [];
+  // 正在转/排队：带实时百分比
+  const runningDetail = (F.filter(f => f.state === 'transcoding' || f.state === 'queued')
+    .map(f => `${esc(f.name)}　${f.pct}%`).join('\n'));
+  grid.innerHTML = [
+    vtcell(vt.total, '视频总数', '', `库中视频总数\n共 ${fmt(vt.total)} 个视频`),
+    vtcell(vt.needConv, '需转码', 'warn',
+      `浏览器播不了、需要转码\n共 ${fmt(vt.needConv)} 个` +
+      (vtDetail(F, 'pending') ? `\n\n待转码：\n${vtDetail(F, 'pending')}` : '')),
+    vtcell(vt.done, '已转码', 'ok',
+      `本轮已转码完成\n共 ${fmt(vt.done)} 个` +
+      (vtDetail(F, 'done') ? `\n\n已完成：\n${vtDetail(F, 'done')}` : '')),
+    vtcell(vt.skipped, '可直接播', 'ok',
+      `编码本就浏览器可播、无需转码\n共 ${fmt(vt.skipped)} 个` +
+      (vtDetail(F, 'skipped') ? `\n\n可直接播：\n${vtDetail(F, 'skipped')}` : '')),
+    vtcell(vt.cached, '命中缓存', '', `以前转过、命中缓存无需重转\n共 ${fmt(vt.cached)} 个`),
+    vtcell(vt.failed, '失败', vt.failed ? 'bad' : '',
+      `探测或转码失败\n共 ${fmt(vt.failed)} 个` +
+      (vtDetail(F, 'failed') ? `\n\n失败：\n${vtDetail(F, 'failed')}` : '')),
+  ].join('');
+  // "正在转"单独放到进度条下方做实时清单
+  const nowBox = $('vtnow');
+  if (runningDetail) {
+    nowBox.textContent += (nowBox.textContent ? '\n' : '') + runningDetail;
+    nowBox.style.whiteSpace = 'pre';
+  } else {
+    nowBox.style.whiteSpace = '';
+  }
+  renderVTransList(F);
+}
+
+// ---------- 异常中心 ----------
+//
+// 原来是「错误报告」，只列转码失败。现在把需要人处理的东西都收进来：
+// 转码/探测失败、素材丢失（库里有磁盘上没了）、扫描报错、QC 判定损坏。
+// 每条带 kind 和 level，页面按 error 优先排序 —— 出问题的永远排在最上面。
+const ISSUE_LABEL = {
+  transcode: '转码失败',
+  missing: '素材丢失',
+  scan: '扫描错误',
+  qc: '质量问题',
+};
+let ISSUE_FILTER = '';        // '' = 全部；否则只显示某一类
+let ISSUE_ONLY_ERR = false;  // 只看 error
+
+function issueRow(it) {
+  const isErr = it.level === 'error';
+  return `<div class="drow2 ${isErr ? '' : 'warn'}" data-tip="${esc(ISSUE_LABEL[it.kind] || it.kind)}：${esc(it.name)}\n${esc(it.detail)}">
+    <span class="dkind">${esc(ISSUE_LABEL[it.kind] || it.kind)}</span>
+    <span class="dfname">${esc(it.name)}</span>
+    <span class="dreason">${esc(it.detail)}</span>
+  </div>`;
+}
+
+function renderIssues() {
+  const box = $('issues'), meta = $('iss-meta'), block = $('issblock');
+  const all = (SECTIONS.issues && SECTIONS.issues.items) || [];
+  let list = all;
+  if (ISSUE_ONLY_ERR) list = list.filter((x) => x.level === 'error');
+  if (ISSUE_FILTER) list = list.filter((x) => x.kind === ISSUE_FILTER);
+  // error 排前面，其余按类型分组；同类保持服务端顺序（那边已按名称排序）。
+  list = list.slice().sort((a, b) => (a.level === b.level ? 0 : a.level === 'error' ? -1 : 1));
+
+  // 同步筛选按钮的选中态
+  document.querySelectorAll('[data-ik]').forEach((b) => {
+    b.classList.toggle('on', b.getAttribute('data-ik') === ISSUE_FILTER);
+  });
+  const errBtn = $('iss-only-err');
+  if (errBtn) errBtn.classList.toggle('on', ISSUE_ONLY_ERR);
+
+  if (!list.length) {
+    block.style.display = all.length ? '' : 'none';
+    meta.textContent = all.length ? '当前筛选下没有异常' : '';
+    box.innerHTML = all.length
+      ? `<div class="dempty">当前筛选下没有异常（共 ${all.length} 条）</div>`
+      : '';
+    return;
+  }
+  block.style.display = '';
+  meta.textContent = `${list.length} / ${all.length} 条`;
+  let html = `<div class="dheadrow"><span class="dkind">类型</span><span class="dfname">对象</span><span>详情</span></div>`;
+  html += list.map(issueRow).join('');
+  box.innerHTML = html;
+}
+
+// ---------- 转码逐文件清单（筛选 + 排序） ----------
+//
+// 之前逐文件明细只藏在 tooltip 里（鼠标悬停才看得到），40 多个视频时根本没法排查。
+// 现在它是一张可筛选、可排序的表：默认按"失败优先 → 进度倒序"排，
+// 最需要关注的永远在最上面，不用滚动也不用悬停。
+const VT_SORT = {
+  smart:   { label: '智能排序（问题优先）', fn: (a, b) => vtSmartRank(a) - vtSmartRank(b) || a.name.localeCompare(b.name, 'zh-CN') },
+  name:    { label: '按文件名',       fn: (a, b) => a.name.localeCompare(b.name, 'zh-CN') },
+  pct:     { label: '按进度（低→高）', fn: (a, b) => a.pct - b.pct },
+  state:   { label: '按状态',         fn: (a, b) => a.state.localeCompare(b.state) },
+};
+const VT_RANK = { failed: 0, transcoding: 1, queued: 2, pending: 3, done: 4, skipped: 5 };
+function vtSmartRank(f) { return (VT_RANK[f.state] === undefined ? 9 : VT_RANK[f.state]); }
+
+let VT_FILTER = '';   // '' = 全部
+let VT_SORTKEY = 'smart';
+let VT_QUERY = '';
+
+function renderVTransList(files) {
+  const box = $('vtlist'), meta = $('vtlist-meta');
+  if (!box) return;
+  const all = files || [];
+  let list = all;
+  if (VT_FILTER) list = list.filter((f) => f.state === VT_FILTER);
+  if (VT_QUERY) {
+    const q = VT_QUERY.toLowerCase();
+    list = list.filter((f) => f.name.toLowerCase().indexOf(q) >= 0);
+  }
+  const sorter = (VT_SORT[VT_SORTKEY] || VT_SORT.smart).fn;
+  list = list.slice().sort(sorter);
+
+  document.querySelectorAll('[data-vt]').forEach((b) => {
+    b.classList.toggle('on', b.getAttribute('data-vt') === VT_FILTER);
+  });
+
+  if (!all.length) { box.innerHTML = ''; meta.textContent = ''; return; }
+  meta.textContent = `${list.length} / ${all.length} 个视频`;
+  if (!list.length) {
+    box.innerHTML = `<div class="dempty">没有符合条件的视频</div>`;
+    return;
+  }
+  const rows = list.map((f) => {
+    const st = VT_STATE_LABEL[f.state] || f.state;
+    const tip = `${f.name}\n状态：${st}\n编码：${f.codec || '未知'}` +
+      (f.pct ? `\n进度：${f.pct}%` : '') +
+      (f.source ? `\n来源：${f.source === 'original' ? '原文件' : '转码产物'}` : '') +
+      (f.msg ? `\n原因：${f.msg}` : '');
+    return `<div class="vtrow" data-tip="${esc(tip)}">
+      <span class="vtst s-${esc(f.state)}">${esc(st)}</span>
+      <span class="vtname">${esc(f.name)}</span>
+      <span class="vtcodec">${esc(f.codec || '—')}</span>
+      <span class="vtpct">${f.state === 'transcoding' ? f.pct + '%' : (f.pct ? '100%' : '')}</span>
+    </div>`;
+  }).join('');
+  box.innerHTML = `<div class="dheadrow"><span class="vtst">状态</span><span class="vtname">文件</span><span class="vtcodec">编码</span><span class="vtpct">进度</span></div>` + rows;
+}
+
+function renderHealth() {
+  const h = SECTIONS.health;
+  const box = $('health');
+  if (!box || !h) return;
+  const bit = (ok, label) => `<span class="hbit ${ok ? 'ok' : 'bad'}">${ok ? '✓' : '✗'} ${esc(label)}</span>`;
+  box.innerHTML = bit(h.db, '数据库')
+    + bit(h.root, '素材目录')
+    + bit(h.cacheWritable, '转码缓存可写');
+}
+
+function renderFolders() {
+  const f = SECTIONS.folders || {};
+  const p = f.total > 0 ? Math.round(f.claimed / f.total * 100) : 0;
+  const stale = f.staleList || [];
+  // 僵尸认领单独列一块并给「强制释放」按钮：这些目录名义上被占着，
+  // 实际上没人干活，不处理就会一直卡住别人的进度。
+  const staleBox = stale.length ? `
+    <div class="dstale">
+      <div class="dstalehead">僵尸认领 ${stale.length} 个（超过 30 分钟无动作）</div>
+      <div class="dstalerow" data-tip="认领人：${esc(stale[0].user)}\n已闲置 ${Math.round(stale[0].idleMs/60000)} 分钟\n强制释放后该用户将无法修改这个目录，直到他重新认领">
+        <span class="dstaleuser">${esc(stale[0].user)}</span>
+        <span class="dstaleidle">闲置 ${Math.round(stale[0].idleMs/60000)} 分钟</span>
+        <button class="drelease" data-release="${stale[0].folderId}" data-owner="${esc(stale[0].user)}">强制释放</button>
+        ${stale.length > 1 ? `<span class="dstalemore">另有 ${stale.length - 1} 个</span>` : ''}
+      </div>
+    </div>` : '';
+  $('folders').innerHTML = `
+    <div class="dnum"><b style="color:var(--keep)">${fmt(f.claimed)}</b><span>已认领</span></div>
+    <div class="dnum"><b style="color:var(--warn)">${fmt(f.unclaimed)}</b><span>未认领</span></div>
+    <div class="dbar"><i style="width:${p}%"></i></div>
+    <div class="dtot">共 ${fmt(f.total)} 个目录 · ${p}%</div>
+    ${staleBox}`;
+}
+
+function renderWorkers() {
+  const w = SECTIONS.workers || {};
+  const box = $('workers'), meta = $('wk-meta');
+  const total = w.count || 0, reviewing = w.reviewing || 0;
+  meta.textContent = total > 0 ? (`共 ${total} 人 · 正在审阅 ${reviewing} 人`) : '';
   if (!w.list || w.list.length === 0) {
     box.innerHTML = `<div class="dempty">当前没有人在岗（无认领、近 5 分钟也无审阅动作）</div>`;
     return;
   }
-  let html = `<div class="dempty" style="padding:0 2px 2px">共 ${w.count} 人在岗</div>`;
-  for (const u of w.list) {
-    const initial = (u.name || "?").slice(0, 1);
-    const on = u.claiming ? `正在审：<b>${escapeHtml(u.claiming)}</b>` : "浏览中";
-    html += `<div class="dworker">
-      <div class="davatar">${escapeHtml(initial)}</div>
-      <div class="dnm">${escapeHtml(u.name)}</div>
-      <div class="don">${on}</div>
+  box.innerHTML = w.list.map((u) => {
+    const initial = (u.name || '?').slice(0, 1);
+    const on = u.claiming ? `正在审 <b>${esc(u.claiming)}</b>` : '浏览中';
+    return `<div class="dchip">
+      <div class="da">${esc(initial)}</div>
+      <div><div class="dn">${esc(u.name)}</div><div class="dd">${on}</div></div>
     </div>`;
-  }
-  box.innerHTML = html;
+  }).join('');
 }
 
-const QC_DEFS = [
-  ["dup", "重复"], ["corrupt", "损坏"], ["blank", "空镜"], ["dirt", "镜头脏污"],
-  ["blur", "模糊"], ["exposure", "曝光异常"], ["noise", "噪点"], ["shake", "抖动"],
-];
-function renderQC(qc) {
-  const box = $("qc");
-  if (!qc || !qc.total) { box.innerHTML = `<div class="dempty">尚无质量检测记录</div>`; return; }
-  let html = `<span class="dchip">已检测 ${fmt(qc.total)} 个</span>`;
-  for (const [key, label] of QC_DEFS) {
-    const n = qc[key] || 0;
-    html += `<span class="dchip d${key}${n === 0 ? ' dzero' : ''}">${label} ${fmt(n)}</span>`;
-  }
-  box.innerHTML = html;
-}
-
-function renderScan(scan) {
-  const b = $("banner");
+function renderScan() {
+  const scan = SECTIONS.scan;
+  const b = $('banner');
   if (scan && scan.running) {
-    const pct = scan.total > 0 ? Math.round(scan.done / scan.total * 100) : 0;
-    b.style.display = "block";
-    b.className = "dbanner";
-    b.textContent = `扫描进行中：${fmt(scan.done)} / ${fmt(scan.total)}（${pct}%）`;
+    const p = scan.total > 0 ? Math.round(scan.done / scan.total * 100) : 0;
+    b.style.display = 'block'; b.className = 'dbanner';
+    b.textContent = `扫描进行中：${fmt(scan.done)} / ${fmt(scan.total)}（${p}%）`;
   } else if (scan && scan.endedAt && scan.total > 0) {
-    b.style.display = "block";
-    b.className = "dbanner ok";
+    b.style.display = 'block'; b.className = 'dbanner ok';
     b.textContent = `上次扫描完成：共 ${fmt(scan.total)} 个文件`;
   } else {
-    b.style.display = "none";
+    b.style.display = 'none';
   }
 }
 
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+// ---------- 数据层：增量推送 ----------
+//
+// 这里是本次改造的重点。以前是「每 1 秒拉一次全量 + 重建全部 DOM」，
+// 现在是「服务端变了才推、推哪个区块就只重画哪个区块」。
+//
+// SECTIONS 是本地状态缓存，key 与后端 dashboard.go 里的区块常量一一对应。
+// 收到某个区块的增量就替换它，然后只调那个区块自己的 render 函数 ——
+// 其余区块的 DOM 一个字节都不动，也就不会有闪烁和 tooltip 抖动。
+const SECTIONS = {
+  totals: null, media: null, folders: null, workers: null,
+  qc: null, scan: null, vtrans: null, issues: null, health: null,
+};
+
+// 区块 -> 渲染函数。'scan' 例外：它管的是顶部横幅，不是一块内容区。
+const RENDER = {
+  totals: renderKPIs,
+  media: renderKPIs,       // KPI 卡片同时吃 totals 和 media，合并成一张图
+  folders: renderFolders,
+  workers: renderWorkers,
+  qc: renderQC,
+  scan: renderScan,
+  vtrans: renderVTrans,
+  issues: renderIssues,
+  health: renderHealth,
+};
+
+function applySection(name, data) {
+  if (!(name in SECTIONS)) return;          // 未知区块：忽略，别让一条脏数据把页面搞崩
+  SECTIONS[name] = data;
+  const fn = RENDER[name];
+  if (fn) fn();
+  touchUpdated();
 }
 
-async function load() {
-  try {
-    const r = await fetch("/api/dashboard");
-    if (!r.ok) throw new Error("HTTP " + r.status);
-    const d = await r.json();
-    renderOverview(d.totals || {});
-    renderMedia(d.media || {});
-    renderFolders(d.folders || {});
-    renderWorkers(d.workers || {});
-    renderQC(d.qc || {});
-    renderScan(d.scan);
-    $("dot").className = "ddot ok";
-    $("updated").textContent = "更新于 " + new Date().toLocaleTimeString("zh-CN");
-  } catch (e) {
-    $("dot").className = "ddot err";
-    $("updated").textContent = "连接失败，重试中…";
-  }
+function touchUpdated() {
+  $('dot').className = 'ddot ok';
+  $('updated').textContent = '已更新 ' + new Date().toLocaleTimeString('zh-CN');
 }
 
-// 初始拉一次
-load();
-
-// 异步事件流：扫描/认领/审阅/质量/已处理等"随时变动的数据"由服务端推送驱动刷新（非轮询）。
-function scheduleRefresh() {
-  if (scheduleRefresh._t) return;
-  scheduleRefresh._t = setTimeout(function () { scheduleRefresh._t = null; load(); }, 500);
-}
+// ---------- 事件流（唯一的实时数据来源） ----------
+//
+// 事件形状：
+//   {type:"init",  data:{type:"snapshot", sections:{...}}}   ← 建连首帧，全量
+//   {type:"dash",  data:{section:"totals", data:{...}}}     ← 单区块增量
+//   其余 type（review/claim/qc/...）是审阅页的老事件，仪表盘不关心，忽略即可。
+//
+// 关于「兜底」：EventSource 断线会自动重连，重连后服务端会**再发一次全量首帧**，
+// 所以不存在"漏了事件导致数字永久停在旧值"的问题。唯一需要补的是本地状态
+// 未知的情况（比如首帧到达前就收到增量），那就退化成拉一次全量。
 function connectEvents() {
   if (window.__es && window.__es.readyState !== 2) return;
-  const es = new EventSource("/api/events");
+  const es = new EventSource('/api/events');
   window.__es = es;
-  const TYPES = ["scan", "claim", "review", "folder-clear", "folder-decision", "qc", "processed"];
+
+  es.onopen = function () {
+    $('dot').className = 'ddot ok';
+  };
+  es.onerror = function () {
+    // EventSource 自己会重连，不用手动重建。转成"连接中"的提示即可。
+    $('dot').className = 'ddot err';
+    $('updated').textContent = '连接断开，正在重连…';
+  };
   es.onmessage = function (ev) {
     let d;
     try { d = JSON.parse(ev.data); } catch (e) { return; }
-    if (TYPES.indexOf(d.type) >= 0) scheduleRefresh();
-  };
-  es.onerror = function () { /* 浏览器会自动重连 */ };
-}
-connectEvents();
 
-// 事件流对慢订阅者会丢事件（见 events.go：进度类不保证送达）；回到前台时主动重同步一次。
-document.addEventListener("visibilitychange", function () {
-  if (document.visibilityState === "visible") { connectEvents(); load(); }
+    if (d.type === 'init' && d.data && d.data.sections) {
+      // 全量首帧：一次性填满本地状态，再统一渲染一遍。
+      const secs = d.data.sections;
+      let any = false;
+      for (const k in SECTIONS) {
+        if (secs[k] !== undefined) { SECTIONS[k] = secs[k]; any = true; }
+      }
+      if (any) {
+        RENDER.totals(); RENDER.qc(); RENDER.vtrans();
+        RENDER.folders(); RENDER.workers(); RENDER.issues();
+        RENDER.health(); RENDER.scan();
+        touchUpdated();
+      }
+      return;
+    }
+
+    if (d.type === 'dash' && d.data && d.data.section) {
+      // 关键：如果本地还没这个区块（比如增量先于首帧到达），
+      // 先拉一次全量对齐，而不是拿 undefined 去渲染。
+      if (SECTIONS[d.data.section] === undefined && SECTIONS[d.data.section] !== null) {
+        SECTIONS[d.data.section] = null;
+        loadFull();
+        return;
+      }
+      applySection(d.data.section, d.data.data);
+    }
+  };
+}
+
+// loadFull 全量对账。正常情况下用不到（建连就有全量首帧）；
+// 只在增量早于首帧、或需要人工核对时调用。
+async function loadFull() {
+  try {
+    const r = await fetch('/api/dashboard', { cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const secs = await r.json();
+    for (const k in SECTIONS) {
+      if (secs[k] !== undefined) SECTIONS[k] = secs[k];
+    }
+    RENDER.totals(); RENDER.qc(); RENDER.vtrans();
+    RENDER.folders(); RENDER.workers(); RENDER.issues();
+    RENDER.health(); RENDER.scan();
+    touchUpdated();
+  } catch (e) {
+    $('dot').className = 'ddot err';
+    $('updated').textContent = '同步失败，等待推送…';
+  }
+}
+
+// 兜底对账：每 30 秒拉一次全量。
+// 频率从 1 秒降到 30 秒，是因为正常路径已经不靠拉取了 —— 这只是防
+// "浏览器休眠/网络抖动导致某条增量真的丢了"的保险，代价可以忽略。
+// 页面在后台时不做，回到前台立刻对账。
+setInterval(function () {
+  if (document.visibilityState === 'visible') loadFull();
+}, 30000);
+
+document.addEventListener('visibilitychange', function () {
+  if (document.visibilityState === 'visible') { connectEvents(); loadFull(); }
 });
+
+// ---------- 交互绑定 ----------
+// 用事件委托而不是逐个绑：筛选 chip 是随渲染重画 innerHTML 的，
+// 逐个 addEventListener 会在每次重画后丢一批监听器。
+document.addEventListener('click', function (e) {
+  const vt = e.target.closest('[data-vt]');
+  if (vt) {
+    VT_FILTER = vt.getAttribute('data-vt');
+    renderVTransList((SECTIONS.vtrans && SECTIONS.vtrans.files) || []);
+    return;
+  }
+  const ik = e.target.closest('[data-ik]');
+  if (ik) {
+    ISSUE_FILTER = ik.getAttribute('data-ik');
+    renderIssues();
+    return;
+  }
+  const onlyErr = e.target.closest('#iss-only-err');
+  if (onlyErr) {
+    ISSUE_ONLY_ERR = !ISSUE_ONLY_ERR;
+    renderIssues();
+    return;
+  }
+  const rel = e.target.closest('[data-release]');
+  if (rel) {
+    forceRelease(parseInt(rel.getAttribute('data-release'), 10), rel.getAttribute('data-owner') || '');
+  }
+});
+
+// 搜索：输入即筛。debounce 是为了别在每个按键上都重排 40 多行。
+let vtQueryTimer = null;
+document.addEventListener('input', function (e) {
+  if (e.target.id !== 'vtq') return;
+  clearTimeout(vtQueryTimer);
+  vtQueryTimer = setTimeout(function () {
+    VT_QUERY = e.target.value.trim();
+    renderVTransList((SECTIONS.vtrans && SECTIONS.vtrans.files) || []);
+  }, 150);
+});
+
+document.addEventListener('change', function (e) {
+  if (e.target.id !== 'vtsort') return;
+  VT_SORTKEY = e.target.value;
+  renderVTransList((SECTIONS.vtrans && SECTIONS.vtrans.files) || []);
+});
+
+// forceRelease 强制释放一个僵尸认领。
+// 二次确认是必须的：这个按钮的作用就是推翻另一个人的目录锁，
+// 手滑点一下就会把同事正在审的目录抢走。
+async function forceRelease(folderId, owner) {
+  if (!confirm(`确定强制释放目录 #${folderId} 的认领吗？\n\n` +
+      `当前认领人：${owner}\n只有超过 30 分钟没有任何动作的认领才允许强制释放。\n` +
+      `如果 ${owner} 正在审这些素材，他之后将无法再修改（需重新认领）。`)) {
+    return;
+  }
+  try {
+    const r = await fetch('/api/claim/release', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ folderId: folderId, force: true }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (d && d.ok) {
+      alert(`已释放 ${owner || '该用户'} 的僵尸认领`);
+    } else {
+      alert((d && d.msg) || '释放失败：该认领还在活动期内');
+    }
+  } catch (err) {
+    alert('释放失败：' + err.message);
+  }
+}
 </script>
 </body>
 </html>

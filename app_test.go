@@ -32,6 +32,11 @@ func testRoot(t *testing.T) string {
 }
 
 func testApp(t *testing.T, addr string) *app {
+	return testAppWithToken(t, addr, false)
+}
+
+// testAppWithToken 建测试实例；allowQueryToken 控制下载页 URL 里是否拼口令。
+func testAppWithToken(t *testing.T, addr string, allowQueryToken bool) *app {
 	t.Helper()
 	// main() 里做的事情：把内嵌网页挂给静态路由（外部 tooling 直接 newApp 时它是空的）
 	sub, err := fs.Sub(webEmbed, "web")
@@ -49,6 +54,7 @@ func testApp(t *testing.T, addr string) *app {
 		vjobs:    1,
 		vres:     720,
 		ires:     1600,
+		allowQueryToken: allowQueryToken,
 	}
 	a, err := newApp(cfg, NewLogRing(200), "")
 	if err != nil {
@@ -100,8 +106,13 @@ func TestSetRoot(t *testing.T) {
 func TestSetToken(t *testing.T) {
 	a := testApp(t, "127.0.0.1:0")
 	before := a.Status()
-	if !strings.Contains(before.DownloadURL, "?t="+before.Token) {
-		t.Fatalf("下载页地址里没带口令: %s", before.DownloadURL)
+	// 默认**不**把口令拼进下载页 URL（-allow-query-token 才开）。
+	// 口令在 URL 里会进浏览器历史、Referer、代理日志和截图，泄露即长期有效凭据。
+	if strings.Contains(before.DownloadURL, "?t=") {
+		t.Fatalf("默认不该把口令拼进 URL: %s", before.DownloadURL)
+	}
+	if before.Token == "" {
+		t.Fatal("口令不该为空")
 	}
 
 	if err := a.SetToken("woaini123"); err != nil {
@@ -111,8 +122,20 @@ func TestSetToken(t *testing.T) {
 	if after.Token != "woaini123" {
 		t.Fatalf("口令没换成: %s", after.Token)
 	}
-	if !strings.Contains(after.DownloadURL, "?t=woaini123") {
-		t.Fatalf("下载页地址没跟着更新: %s", after.DownloadURL)
+	// 默认仍然不带 ?t=；口令本身换了、对外地址不泄漏凭据。
+	if strings.Contains(after.DownloadURL, "?t=") {
+		t.Fatalf("默认不该把口令拼进 URL: %s", after.DownloadURL)
+	}
+	// 显式打开 -allow-query-token 时才拼，且要跟着 SetToken 一起更新。
+	a2 := testAppWithToken(t, "127.0.0.1:0", true)
+	if !strings.Contains(a2.Status().DownloadURL, "?t="+a2.Status().Token) {
+		t.Fatalf("allowQueryToken 打开时下载页地址里应带口令: %s", a2.Status().DownloadURL)
+	}
+	if err := a2.SetToken("woaini123"); err != nil {
+		t.Fatalf("SetToken: %v", err)
+	}
+	if !strings.Contains(a2.Status().DownloadURL, "?t=woaini123") {
+		t.Fatalf("下载页地址没跟着更新: %s", a2.Status().DownloadURL)
 	}
 	if after.ReviewURL != before.ReviewURL {
 		t.Fatalf("换口令不该动审阅页地址: %s → %s", before.ReviewURL, after.ReviewURL)

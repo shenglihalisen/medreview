@@ -17,10 +17,25 @@ type Hub struct {
 	mu   sync.Mutex
 	next int
 	subs map[int]chan []byte
+	// onConnect 建连时调用一次，返回首帧要下发的内容（可以是 nil）。
+	// 仪表盘靠它在 SSE 建好的那一瞬间就拿到全量快照，不必先 GET 一次 /api/dashboard ——
+	// 这样"连上即完整"，中间不会出现一帧空白或数字对不上的空窗。
+	// 审阅页不需要首帧，返回 nil 即可。
+	onConnect func() any
 }
 
 func NewHub() *Hub {
 	return &Hub{subs: map[int]chan []byte{}}
+}
+
+// SetOnConnect 注册建连回调（只能设一次，重复调用直接忽略 —— 它在服务启动期
+// 由装配代码调用一次，不该被运行期误改）。
+func (h *Hub) SetOnConnect(f func() any) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.onConnect == nil {
+		h.onConnect = f
+	}
 }
 
 func (h *Hub) Broadcast(typ string, data any) {
@@ -67,12 +82,28 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	id, ch := h.subscribe()
 	defer h.unsubscribe(id)
 
+	// 首帧在注册订阅**之后**算：这样从"开始算"到"能收事件"之间发生的任何变化
+	// 都不会漏掉。顺序反过来的话，那段时间里的变更既不在首帧里、也没被订阅到，
+	// 页面就会一直停在旧数字上，直到下一次该区块变化才纠正过来。
+	var first []byte
+	if h.onConnect != nil {
+		if v := h.onConnect(); v != nil {
+			first, _ = json.Marshal(event{Type: "init", Data: v})
+		}
+	}
+
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
+	if first != nil {
+		w.Write([]byte("data: "))
+		w.Write(first)
+		w.Write([]byte("\n\n"))
+		flusher.Flush()
+	}
 
 	tick := make(chan struct{}, 1)
 	go func() {

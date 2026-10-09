@@ -50,6 +50,7 @@ func main() {
 	cacheDir := flag.String("cache", "cache", "转码缓存目录")
 	token := flag.String("token", "", "下载页口令；留空则每次启动随机生成")
 	openDL := flag.Bool("open-dl", false, "关闭下载权限校验（任何页面都能打包下载）")
+	allowQueryToken := flag.Bool("allow-query-token", false, "允许用 ?t=口令 鉴权（默认关闭：口令会进浏览器历史/Referer/日志）。需要分享请用一次性分享链接")
 	vjobs := flag.Int("vjobs", 3, "视频预转码并发数，即预热时同时转几个视频")
 	encFlag := flag.String("enc", "", "视频转码编码：cpu=libx264 软编（默认）；nvenc/qsv/amf=只用指定的这些（逗号分隔，如 nvenc,qsv）；auto=都比速度，快 20%+ 才换")
 	qcFlag := flag.String("qcdec", "", "视频 QC 解码：cpu=软解（默认）；cuda/qsv/d3d11va=只用指定的这些（逗号分隔）；auto=探测后择优")
@@ -187,6 +188,7 @@ func main() {
 		cacheDir:   *cacheDir,
 		token:      *token,
 		openDL:     *openDL,
+		allowQueryToken: *allowQueryToken,
 		vjobs:      *vjobs,
 		qcHW:       qcHW,
 		encHW:      encHW,

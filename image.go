@@ -47,6 +47,7 @@ type ImageService struct {
 	dir       string // 缓存根目录（里面再分 iprev/）
 	shortSide int    // 较小边封顶到这个值；0 = 一律原图（功能关闭）
 	ffmpeg    string
+	magick    string // ImageMagick 路径；用于 ffmpeg 解不开的格式（相机 RAW / HEIC / AVIF / JXL / PSD）
 
 	keyLocks sync.Map // cache key -> *sync.Mutex，同一张图的并发请求只转一次
 
@@ -66,6 +67,7 @@ const imagePreviewDir = "iprev"
 func NewImageService(store *Store, cacheDir string, shortSide int, hub *Hub) (*ImageService, error) {
 	s := &ImageService{store: store, dir: cacheDir, shortSide: shortSide, hub: hub}
 	s.ffmpeg = findTool("ffmpeg")
+	s.magick = findTool("magick")
 	if shortSide <= 0 {
 		log.Println("图片预览: 已关闭（-ires 0，一律原图）")
 		return s, nil
@@ -73,6 +75,11 @@ func NewImageService(store *Store, cacheDir string, shortSide int, hub *Hub) (*I
 	if s.ffmpeg == "" {
 		log.Println("图片预览: 未找到 ffmpeg —— 大图将直接给原文件（加载慢但不影响使用）")
 		return s, nil
+	}
+	if s.magick == "" {
+		log.Println("图片预览: 未找到 ImageMagick —— 相机 RAW / HEIC / AVIF / JXL / PSD 等格式将退回原文件（可能浏览器打不开）；放到 tools/imagemagick/magick.exe 即可启用")
+	} else {
+		log.Printf("图片预览: ImageMagick 就绪（相机 RAW / HEIC / AVIF / JXL / PSD 走它转码）")
 	}
 	log.Printf("图片预览: 就绪（较小边≤%d，点开时现转+缓存，原图可用「看原图」查看）", shortSide)
 	return s, nil
@@ -104,22 +111,15 @@ func (s *ImageService) Preview(ctx context.Context, f *FileItem) (path string, o
 // 损坏文件每进一次目录都会试一次，打日志就是刷屏；反正兜底是回退原图）。
 func (s *ImageService) preview(ctx context.Context, f *FileItem, logFail bool) (path string, orig bool, err error) {
 	src := s.store.absPath(f.RelPath)
-	if s.shortSide <= 0 || s.ffmpeg == "" {
+	if s.shortSide <= 0 {
 		return src, true, nil
 	}
 
-	dispW, dispH, known := imageDisplaySize(src)
-	targetW, targetH, need := 0, 0, false
-	if known {
-		targetW, targetH, need = imgTargetSize(dispW, dispH, s.shortSide)
-	} else {
-		// Go 解不开的格式（HEIC/WEBP 等）：浏览器多半也放不了，顺手转成 JPEG，
-		// 交给 ffmpeg 的 fit-in-box 过滤器自己算尺寸（只缩小不放大）。
-		need = true
-	}
-	if !need {
-		return src, true, nil
-	}
+	ext := strings.ToLower(filepath.Ext(f.RelPath))
+	fd, knownFmt := formatOf(ext)
+	// magick 格式：ffmpeg/Go 都解不开，必须走 ImageMagick 先转成 JPEG。
+	// 没装 magick 就优雅降级给原文件（浏览器多半打不开，但不至于把审阅页搞挂）。
+	useMagick := knownFmt && fd.Decoder == decMagick
 
 	out := s.outPath(f)
 	if _, serr := os.Stat(out); serr == nil {
@@ -144,6 +144,36 @@ func (s *ImageService) preview(ctx context.Context, f *FileItem, logFail bool) (
 		return out, false, nil
 	}
 
+	if useMagick {
+		if s.magick == "" {
+			return src, true, nil // 没装 magick，降级给原文件
+		}
+		if terr := s.transcodeMagick(ctx, src, out); terr != nil {
+			if logFail {
+				log.Printf("图片预览: %s (ImageMagick) 转码失败，回退原图: %v", f.RelPath, terr)
+			}
+			return src, true, nil
+		}
+		s.markProcessed(f.ID)
+		return out, false, nil
+	}
+
+	// 其余走 ffmpeg（含 Go 解不开但 ffmpeg 能解的格式，由 fit-in-box 自己算尺寸）。
+	if s.ffmpeg == "" {
+		return src, true, nil
+	}
+	dispW, dispH, known := imageDisplaySize(src)
+	targetW, targetH, need := 0, 0, false
+	if known {
+		targetW, targetH, need = imgTargetSize(dispW, dispH, s.shortSide)
+	} else {
+		// Go 解不开但 ffmpeg 能解（WEBP 等）：浏览器多半也放不了，顺手转成 JPEG，
+		// 交给 ffmpeg 的 fit-in-box 过滤器自己算尺寸（只缩小不放大）。
+		need = true
+	}
+	if !need {
+		return src, true, nil
+	}
 	if terr := s.transcode(ctx, src, out, targetW, targetH, known); terr != nil {
 		if logFail {
 			log.Printf("图片预览: %s 转码失败，回退原图: %v", f.RelPath, terr)
@@ -328,6 +358,40 @@ func (s *ImageService) transcode(ctx context.Context, src, out string, w, h int,
 		return nil
 	}
 	return lastErr
+}
+
+// transcodeMagick 用 ImageMagick 把 ffmpeg/Go 解不开的格式（相机 RAW / HEIC / AVIF /
+// JXL / PSD）先转成小边 ≤ shortSide 的 JPEG。Go 解不开这些格式，拿不到原始尺寸，
+// 所以交给 magick 的 fit-in-box 过滤器自己算（只缩小不放大）。
+//
+// 失败处理：调用方（preview）会把它当成「转码失败」回退原文件，这里只负责尽力转、
+// 并清理临时文件，不自行决定降级策略。
+func (s *ImageService) transcodeMagick(ctx context.Context, src, out string) error {
+	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
+		return err
+	}
+	// -auto-orient 转正 EXIF 方向（相机 RAW / 手机 HEIC 常见竖拍横存）；
+	// -resize "NxN>" 只在比 N 大时才缩，保持比例；-quality 85 够预览用。
+	// 临时文件必须带 .jpg 扩展名：magick 靠输出扩展名推断格式，
+	// 无扩展名时写不出内容（实测产物 0 字节）。最终由 moveFileWithRetry 改名成 out（也是 .jpg）。
+	tmp := fmt.Sprintf("%s.part.%d.jpg", out, atomic.AddUint64(&s.tmpSeq, 1))
+	args := []string{
+		src, "-auto-orient",
+		"-resize", fmt.Sprintf("%dx%d>", s.shortSide, s.shortSide),
+		"-quality", "85",
+		tmp,
+	}
+	cmd := exec.CommandContext(ctx, s.magick, args...)
+	var errBuf bytes.Buffer
+	cmd.Stderr = &errBuf
+	if err := cmd.Run(); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("magick: %v: %s", err, strings.TrimSpace(errBuf.String()))
+	}
+	if err := moveFileWithRetry(tmp, out); err != nil {
+		return err
+	}
+	return nil
 }
 
 // moveFileWithRetry 把 src 原子落盘到 dst，专门消化「rename 偶发找不到源」的瞬时抖动：
