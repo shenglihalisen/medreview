@@ -156,18 +156,33 @@
   // 视频：先问服务端这个文件浏览器能不能直接播。
   // 手机录屏常见 HEVC / H.265，Chrome/Edge 解不了，必须由服务端先转成 H.264；
   // 转码期间服务端会回报百分比，这里透传给界面显示进度。
+  //
+  // 用户 2026-10-10 要求：**转码不了的，一律回退播原文件**，别只给一句
+  // "无法播放"就让人什么都看不着。只有两种情况不退回：
+  //   - ready       ：转码产物就绪，正常用转码版（画质/体积更友好）；
+  //   - transcoding ：正在转码，显示进度并继续等（等不到自然落到回退）。
+  // 其余（unavailable 缺 ffmpeg、failed 转码失败、error、以及未知状态）
+  // 全部 onReady 原文件 —— 浏览器播不了 HEVC 至少还能下载/用别的工具打开，
+  // 页面不该到此为止。
   function videoSrc(id, onReady, onState) {
+    function fallbackToOriginal() {
+      onReady(U("/api/media?id=" + id));
+      return true;
+    }
     return fetch(U("/api/vtrans-status?id=" + id), { headers: { "X-User": encodeURIComponent(S.user) } })
       .then(function (r) { return r.json(); })
       .then(function (d) {
-        if (d && d.state === "ready") { onReady(U("/api/vtrans?id=" + id)); return true; }
+        var st = d && d.state;
+        if (st === "ready") { onReady(U("/api/vtrans?id=" + id)); return true; }
+        if (st === "transcoding") { onState(d); return false; }
+        // 转码不了（缺 ffmpeg / 转码失败 / 未知状态）→ 展示原文件。
+        // 先把原因交给调用方记日志/提示，再照样给原文件。
         onState(d || { state: "error", msg: "未知状态" });
-        return false;
+        return fallbackToOriginal();
       })
       .catch(function () {
         // 取不到状态（服务端偏旧/网络异常）：退回原文件，至少不比以前差
-        onReady(U("/api/media?id=" + id));
-        return true;
+        return fallbackToOriginal();
       });
   }
 
@@ -926,14 +941,14 @@
             }
           }, function (d) {
             if (!card.isConnected) return;
-            if (d.state === "transcoding") {
+            // 注意：只有「转码中」才继续等；转码不了的情况 videoSrc 已经
+            // 回退去挂原文件了，这里**不要**再去改占位文字 —— 那会把刚挂上的
+            // 原文件视频盖回成一句提示，等于白回退。
+            if (d && d.state === "transcoding") {
               ph.textContent = "转码中 " + (d.pct || 0) + "%";
               if (tries < 900) setTimeout(function () { attach(tries + 1); }, 2000);
-            } else if (d.state === "unavailable") {
-              ph.textContent = "需转码(缺 ffmpeg)";
-            } else {
-              ph.textContent = "无法播放";
             }
+            // unavailable / failed / error：原文件已由 videoSrc 挂上，不动。
           });
         };
         attach(0);
@@ -1563,16 +1578,22 @@
           if (p && p.catch) p.catch(function () {});
         }, function (d) {
           if (!box.isConnected) return;
-          if (d.state === "transcoding") {
+          // 只有「转码中」才继续等。转码不了的（缺 ffmpeg / 转码失败）videoSrc
+          // 已经回退去挂原文件了 —— 此时**不要**显示"无法播放"把内容盖掉，
+          // 但可以在播放器下方补一句说明，让人知道看到的是原文件。
+          if (d && d.state === "transcoding") {
             msg.textContent = "正在转码 " + (d.pct || 0) + "%（" + (d.codec || "HEVC") +
               " 编码浏览器无法直接播放，需先转成 H.264）";
             setTimeout(loadVideo, 1500);
-          } else if (d.state === "unavailable") {
-            msg.textContent = "这个视频是 " + (d.codec || "HEVC") +
-              " 编码，浏览器无法播放；服务器未找到 ffmpeg，不能自动转码。";
-          } else {
-            msg.textContent = "无法播放：" + (d.msg || "未知原因");
+            return;
           }
+          // 回退提示：挂上原文件之后，在播放器上方留一行小字说明原因
+          var why = d && d.msg ? d.msg :
+            ("该视频无法转码（" + ((d && d.codec) || "未知编码") + "），已显示原文件");
+          var note = document.createElement("div");
+          note.className = "lb-fallback-note";
+          note.textContent = why;
+          box.parentNode && el.lbBody.insertBefore(note, v);
         });
       };
       loadVideo();
