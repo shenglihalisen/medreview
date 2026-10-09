@@ -112,6 +112,7 @@ def start(exe, extra, tag, addr=None):
     LATEST_LOG = os.path.join(RUN, tag + '.log')
     lf = open(LATEST_LOG, 'w', encoding='utf-8', newline='')
     q = subprocess.Popen([exe, '-root', MAT, '-addr', addr, '-token', TOKEN,
+                          '-allow-query-token',  # harness uses ?t= query token; opt into query-token mode
                           '-db', 'v.db', '-cache', CACHE] + extra,
                          cwd=RUN, stdout=lf, stderr=subprocess.STDOUT)
     PROC = q

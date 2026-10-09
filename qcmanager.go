@@ -1,8 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"log"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,9 +23,10 @@ import (
 //   - 已检测且 size/mtime/qc_version 未变的文件直接跳过（HasQC），重进目录几乎零成本；
 //   - 绝不碰 review.decision，纯辅助。
 type QCManager struct {
-	svc   *qc.QCService
-	store *Store
-	hub   *Hub
+	svc    *qc.QCService
+	store  *Store
+	hub    *Hub
+	magick string // ImageMagick 路径；用于把 ffmpeg 解不开的格式（相机 RAW / HEIC / AVIF / JXL / PSD）先转成 JPEG 再做 QC
 
 	mu        sync.Mutex
 	parent    context.Context
@@ -42,14 +48,19 @@ type QCManager struct {
 	pendMu  sync.Mutex
 	pending map[int64]uint64
 	epoch   uint64
+
+	// onChange 有 QC 结论落库时回调（装配时接 Dashboard.Mark）。
+	// 与 VideoService 同样的理由：QC 层不该知道仪表盘的存在。
+	onChange func()
 }
 
-func NewQCManager(ffmpeg, ffprobe, cacheDir string, store *Store, hub *Hub) *QCManager {
+func NewQCManager(ffmpeg, ffprobe, magick, cacheDir string, store *Store, hub *Hub) *QCManager {
 	parent, cancel := context.WithCancel(context.Background())
 	return &QCManager{
 		svc:       qc.NewQCService(ffmpeg, ffprobe, cacheDir),
 		store:     store,
 		hub:       hub,
+		magick:    magick,
 		parent:    parent,
 		cancelAll: cancel,
 		sem:       make(chan struct{}, 3), // 3 个视频同时 QC（用户 2026-10-01）
@@ -184,15 +195,67 @@ func (m *QCManager) runAll(ctx context.Context, files []FileItem, onDone func())
 	}
 }
 
+// analyzePath 返回真正拿去做 QC 的文件路径。
+//
+// ffmpeg 解不开的格式（相机 RAW / HEIC / AVIF / JXL / PSD）会被 runImage 误判成
+// 「损坏」（一帧都解不出来 → FlagCorrupted）。这里先用 ImageMagick 转成临时 JPEG，
+// 再交给现有检测器 —— 既让 RAW/HEIC 也能做 blank/blur/lens-dirt 等质量检查，
+// 又避免它们被错标成损坏。
+//
+// 返回 "" 表示跳过该文件：magick 格式但没装 magick、或转换失败。注意是「跳过」
+// 而不是「标损坏」，这两者天差地别（后者会把好照片当废片）。
+func (m *QCManager) analyzePath(ctx context.Context, f FileItem) string {
+	abs := m.store.absPath(f.RelPath)
+	if f.Kind != kindImage {
+		return abs // 视频都是 ffmpeg 能解的，不涉及 magick
+	}
+	fd, ok := formatOf(strings.ToLower(filepath.Ext(f.RelPath)))
+	if !ok || fd.Decoder != decMagick {
+		return abs // ffmpeg 能直接解，不用 magick
+	}
+	if m.magick == "" {
+		// 没装 ImageMagick：这种格式本就解不开，跳过而非误判损坏。
+		log.Printf("QC: %s 是 ImageMagick 专属格式但本机未安装 ImageMagick，跳过检测", f.RelPath)
+		return ""
+	}
+	tmp, err := os.CreateTemp("", "qc-magick-*.jpg")
+	if err != nil {
+		return ""
+	}
+	tmpName := tmp.Name()
+	tmp.Close()
+	// 限制长边 2000 足够 QC 的 blur/noise 细节；-auto-orient 转正 EXIF 方向。
+	// 不缩太小：QC 的模糊/噪点检测依赖原分辨率细节，缩太狠会漏检。
+	args := []string{abs, "-auto-orient", "-resize", "2000x2000>", "-quality", "90", tmpName}
+	cmd := exec.CommandContext(ctx, m.magick, args...)
+	var buf bytes.Buffer
+	cmd.Stderr = &buf
+	if err := cmd.Run(); err != nil {
+		os.Remove(tmpName)
+		log.Printf("QC: %s 经 ImageMagick 解码失败，跳过: %v (%s)", f.RelPath, err, strings.TrimSpace(buf.String()))
+		return ""
+	}
+	return tmpName // 调用方用完需 os.Remove 清理这个临时文件
+}
+
 func (m *QCManager) runOne(ctx context.Context, f FileItem) {
 	select {
 	case <-ctx.Done():
 		return
 	default:
 	}
-	abs := m.store.absPath(f.RelPath)
+	src := m.analyzePath(ctx, f)
+	if src == "" {
+		return // 跳过（magick 格式没装工具/转换失败，或非可解格式）
+	}
+	// 临时 JPEG（magick 转出来的）用完即删；源文件本身不动。
+	defer func() {
+		if src != m.store.absPath(f.RelPath) {
+			os.Remove(src)
+		}
+	}()
 	// 视频先抽代表帧再测（thumbnail 滤镜），判据和图片完全一样
-	res, err := m.svc.RunMedia(ctx, abs, f.Kind == 2)
+	res, err := m.svc.RunMedia(ctx, src, f.Kind == 2)
 	if err != nil {
 		log.Printf("QC: 检测 %s 失败: %v", f.RelPath, err)
 		return
@@ -201,10 +264,11 @@ func (m *QCManager) runOne(ctx context.Context, f FileItem) {
 		return // 无 ffmpeg，跳过
 	}
 	// EXIF 元数据给跨照片对账用（连拍组 / 镜头污点确认）。
-	// 视频没有这些概念，留空即不参与分组。
+	// 视频没有这些概念，留空即不参与分组。magick 转出的 JPEG 已无 EXIF，
+	// 所以 RAW/HEIC 只走像素确认那一关（不按拍摄时间/设备分组的代价可接受）。
 	device, shootKey := "", ""
 	if f.Kind == 1 {
-		device, shootKey = exifCaptureTags(abs)
+		device, shootKey = exifCaptureTags(src)
 	}
 	// 重复判定 + 落库必须一起做完，否则并发下会整组漏标（见 dupMu 的注释）
 	m.dupMu.Lock()
@@ -235,7 +299,7 @@ func (m *QCManager) runOne(ctx context.Context, f FileItem) {
 					continue // 时间不同（同场景不同时刻）
 				}
 			}
-			ratio, perr := m.svc.PixelDiffRatio(ctx, abs, m.store.absPath(c.RelPath), f.Kind == 2)
+			ratio, perr := m.svc.PixelDiffRatio(ctx, src, m.store.absPath(c.RelPath), f.Kind == 2)
 			if perr != nil {
 				log.Printf("QC: %s 重复像素确认失败，跳过: %v", f.RelPath, perr)
 				continue
@@ -264,6 +328,10 @@ func (m *QCManager) runOne(ctx context.Context, f FileItem) {
 			"fileId": f.ID,
 			"qc":     qcInfoFromResult(res),
 		})
+	}
+	// 仪表盘的 qc / issues 区块跟着标脏：QC 结论变了，条形图和异常中心都要跟着动。
+	if m.onChange != nil {
+		m.onChange()
 	}
 }
 

@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>素材审阅 · 入口</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/style.css">
+<style>
+/* 统一入口页：自管 h- 前缀类，避免与 style.css 的 .card/.bar 等规则冲突。配色沿用 style.css 的 :root 变量。 */
+* { box-sizing: border-box; }
+html, body { margin: 0; min-height: 100%; }
+body {
+  background: radial-gradient(1200px 600px at 50% -10%, var(--primary-soft), var(--bg) 60%);
+  color: var(--text);
+  font: 15px/1.6 "Microsoft YaHei", "PingFang SC", "Segoe UI", system-ui, sans-serif;
+  display: flex; align-items: center; justify-content: center; min-height: 100vh;
+}
+.hwrap { width: 100%; max-width: 960px; padding: 40px 24px; }
+.htop { text-align: center; margin-bottom: 30px; }
+.htop h1 { font-size: 30px; margin: 0; font-weight: 800; letter-spacing: 1px; }
+.htop p { margin: 8px 0 0; color: var(--text-dim); font-size: 14px; }
+.hentries { display: flex; flex-wrap: wrap; gap: 18px; }
+.hcard {
+  flex: 1 1 260px; min-width: 240px; text-decoration: none; color: inherit;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 16px;
+  padding: 26px 24px; display: flex; flex-direction: column; gap: 12px;
+  box-shadow: 0 4px 14px rgba(0,0,0,.05); transition: transform .15s ease, box-shadow .15s ease, border-color .15s ease;
+}
+.hcard:hover { transform: translateY(-4px); box-shadow: 0 12px 28px rgba(0,0,0,.1); border-color: var(--primary); }
+.hicon { width: 50px; height: 50px; border-radius: 13px; display: grid; place-items: center; color: #fff; }
+.hicon svg { width: 26px; height: 26px; }
+.ht { font-size: 19px; font-weight: 700; }
+.hd { font-size: 13px; color: var(--text-dim); }
+.hgo { margin-top: auto; font-size: 13px; font-weight: 600; color: var(--primary); display: flex; align-items: center; gap: 6px; }
+.hgo svg { width: 16px; height: 16px; }
+
+/* ===== 下载口令登录弹窗 ===== */
+.hmodal { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; }
+.hmask { position: absolute; inset: 0; background: rgba(15,20,30,.42); backdrop-filter: blur(2px); }
+.hdlg {
+  position: relative; width: 380px; max-width: calc(100vw - 40px);
+  background: var(--panel); border-radius: 16px; padding: 26px 28px;
+  box-shadow: 0 24px 60px rgba(0,0,0,.24);
+  animation: hpop .18s ease;
+}
+@keyframes hpop { from { opacity: 0; transform: translateY(10px) scale(.97); } to { opacity: 1; transform: none; } }
+.hdlgtitle { font-size: 18px; font-weight: 700; }
+.hdlgsub { font-size: 13px; color: var(--text-dim); margin-top: 6px; }
+.hdlinput {
+  width: 100%; margin-top: 18px; padding: 11px 14px; font-size: 15px;
+  border: 1px solid var(--border-strong); border-radius: 10px; background: var(--bg); color: var(--text);
+  outline: none;
+}
+.hdlinput:focus { border-color: var(--primary); }
+.hdterr { color: var(--reject); font-size: 13px; min-height: 18px; margin-top: 8px; }
+.hdlgbtns { display: flex; gap: 10px; justify-content: flex-end; margin-top: 14px; }
+.hbtn {
+  padding: 10px 20px; font-size: 14px; font-weight: 600; border-radius: 10px;
+  border: 1px solid transparent; cursor: pointer;
+}
+.hbtn.primary { background: var(--primary); color: #fff; }
+.hbtn.primary:hover { filter: brightness(1.06); }
+.hbtn.ghost { background: transparent; border-color: var(--border-strong); color: var(--text-dim); }
+.hbtn.ghost:hover { background: var(--bg); }
+</style>
+</head>
+<body>
+<div class="hwrap">
+  <div class="htop">
+    <h1>素材审阅</h1>
+    <p>选择一个入口开始</p>
+  </div>
+  <div class="hentries">
+    <a class="hcard" href="/review.html">
+      <div class="hicon" style="background:var(--primary)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+      </div>
+      <div class="ht">审阅页</div>
+      <div class="hd">逐张标记保留 / 不保留，按目录分工协作</div>
+      <div class="hgo">进入审阅 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></div>
+    </a>
+
+    <div class="hcard" id="dlcard" style="cursor:pointer">
+      <div class="hicon" style="background:var(--keep)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>
+      </div>
+      <div class="ht">下载页</div>
+      <div class="hd">打包下载已标记的素材（需下载口令）</div>
+      <div class="hgo">去下载 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></div>
+    </div>
+
+    <a class="hcard" href="/admin.html">
+      <div class="hicon" style="background:#8b5cf6">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 13h6V4H4zM14 20h6v-9h-6zM4 20h6v-4H4zM14 8h6V4h-6z"/></svg>
+      </div>
+      <div class="ht">管理仪表盘</div>
+      <div class="hd">实时态势总览 · 质量概况 · 在岗人员</div>
+      <div class="hgo">看仪表盘 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></div>
+    </a>
+  </div>
+</div>
+
+<!-- 下载口令登录弹窗 -->
+<div class="hmodal" id="dlmodal" style="display:none">
+  <div class="hmask" id="dlmask"></div>
+  <div class="hdlg">
+    <div class="hdlgtitle">请输入下载口令</div>
+    <div class="hdlgsub">下载页需要口令验证通过后才能进入</div>
+    <input type="password" id="dltoken" class="hdlinput" placeholder="下载口令" autocomplete="off">
+    <div class="hdterr" id="dlerr"></div>
+    <div class="hdlgbtns">
+      <button class="hbtn ghost" id="dlcancel">取消</button>
+      <button class="hbtn primary" id="dlok">进入下载页</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const modal = $('dlmodal'), tokenInput = $('dltoken'), errBox = $('dlerr');
+
+function openLogin() {
+  modal.style.display = 'grid';
+  errBox.textContent = '';
+  tokenInput.value = '';
+  setTimeout(() => tokenInput.focus(), 30);
+}
+function closeLogin() {
+  modal.style.display = 'none';
+}
+
+// 点下载卡：先要口令，校验通过才进下载页；失败就退回（留在 Home，不跳转）
+$('dlcard').addEventListener('click', openLogin);
+$('dlmask').addEventListener('click', closeLogin);
+$('dlcancel').addEventListener('click', closeLogin);
+tokenInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+
+async function submit() {
+  const tok = tokenInput.value.trim();
+  if (!tok) { errBox.textContent = '请输入口令'; return; }
+  errBox.textContent = '';
+  try {
+    const r = await fetch('/api/dl-login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: tok }),
+    });
+    const d = await r.json();
+    if (d && d.ok) {
+      // 口令正确 → 已种 Cookie，进入下载页（不再带 ?t=，靠 Cookie 鉴权）
+      location.href = '/download.html';
+    } else {
+      // 口令错：自动退回上一个页面（这里就是留在 Home），并提示
+      errBox.textContent = (d && d.msg) || '口令不正确';
+      tokenInput.value = '';
+      tokenInput.focus();
+    }
+  } catch (e) {
+    errBox.textContent = '无法连接服务，请重试';
+  }
+}
+$('dlok').addEventListener('click', submit);
+</script>
+</body>
+</html>

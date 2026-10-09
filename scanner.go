@@ -12,12 +12,77 @@ import (
 	"time"
 )
 
-var mediaExt = map[string]int{
-	".jpg": kindImage, ".jpeg": kindImage, ".png": kindImage, ".gif": kindImage,
-	".bmp": kindImage, ".webp": kindImage, ".tif": kindImage, ".tiff": kindImage,
-	".mp4": kindVideo, ".mov": kindVideo, ".avi": kindVideo, ".mkv": kindVideo,
-	".webm": kindVideo, ".m4v": kindVideo, ".mpg": kindVideo, ".mpeg": kindVideo,
-	".ts": kindVideo, ".flv": kindVideo,
+// 格式注册表：扩展名 -> 怎么处理。
+//
+// 早期版本只有一个扁平的 `map[ext]kind`，于是「ffmpeg 解不开的格式」一旦加进表，
+// 预览就会回退成「浏览器打不开的原文件」还假装成功。现在每种格式显式声明：
+//   - Kind：归图片还是视频（决定 QC / 仪表盘计数 / 前端用哪种查看器）
+//   - Decoder：预览用哪个转码器。ffmpeg 解不开的（相机 RAW / HEIC / AVIF / JXL / PSD）
+//     走 ImageMagick（decMagick），由它先转成 JPEG 再喂进既有管线。
+//   - Previewable：能否生成缩略图。Tier1/Tier2 全部可预览；Tier3（R3D/BRAW 等
+//     需要厂商 SDK 的格式）为 false，页面只显示占位图 + 下载入口。
+//
+// 不在表里的扩展名：扫描时直接忽略（既不入库也不展示），保持原行为。
+const (
+	decFFmpeg = "ffmpeg" // Go/ffmpeg 能直接解
+	decMagick = "magick" // 需要 ImageMagick 转一道（相机 RAW / HEIC / AVIF / JXL / PSD）
+)
+
+type FormatDef struct {
+	Kind        int
+	Decoder     string
+	Previewable bool
+}
+
+var mediaExt = map[string]FormatDef{
+	// ---- Tier 1：ffmpeg 已能解，零新增依赖 ----
+	// 图片
+	".jpg":  {kindImage, decFFmpeg, true}, ".jpeg": {kindImage, decFFmpeg, true},
+	".png":  {kindImage, decFFmpeg, true}, ".gif":  {kindImage, decFFmpeg, true},
+	".bmp":  {kindImage, decFFmpeg, true}, ".webp": {kindImage, decFFmpeg, true},
+	".tif":  {kindImage, decFFmpeg, true}, ".tiff": {kindImage, decFFmpeg, true},
+	".ico":  {kindImage, decFFmpeg, true},
+	".dds":  {kindImage, decFFmpeg, true}, ".tga":  {kindImage, decFFmpeg, true},
+	".ppm":  {kindImage, decFFmpeg, true}, ".pgm":  {kindImage, decFFmpeg, true},
+	".pbm":  {kindImage, decFFmpeg, true}, ".sgi":  {kindImage, decFFmpeg, true},
+	".pcx":  {kindImage, decFFmpeg, true}, ".xbm":  {kindImage, decFFmpeg, true},
+	".xpm":  {kindImage, decFFmpeg, true}, ".sun":  {kindImage, decFFmpeg, true},
+	".dpx":  {kindImage, decFFmpeg, true}, ".exr":  {kindImage, decFFmpeg, true},
+	// 视频
+	".mp4":  {kindVideo, decFFmpeg, true}, ".mov": {kindVideo, decFFmpeg, true},
+	".avi":  {kindVideo, decFFmpeg, true}, ".mkv": {kindVideo, decFFmpeg, true},
+	".webm": {kindVideo, decFFmpeg, true}, ".m4v": {kindVideo, decFFmpeg, true},
+	".mpg":  {kindVideo, decFFmpeg, true}, ".mpeg": {kindVideo, decFFmpeg, true},
+	".ts":   {kindVideo, decFFmpeg, true}, ".flv": {kindVideo, decFFmpeg, true},
+	".mts":  {kindVideo, decFFmpeg, true}, ".m2ts": {kindVideo, decFFmpeg, true}, // AVCHD
+	".mxf":  {kindVideo, decFFmpeg, true}, ".vob": {kindVideo, decFFmpeg, true},
+	".wmv":  {kindVideo, decFFmpeg, true}, ".asf": {kindVideo, decFFmpeg, true},
+	".3gp":  {kindVideo, decFFmpeg, true}, ".ogv": {kindVideo, decFFmpeg, true},
+	".f4v":  {kindVideo, decFFmpeg, true}, ".m2v": {kindVideo, decFFmpeg, true},
+
+	// ---- Tier 2：ffmpeg 解不开，走 ImageMagick ----
+	// 相机 RAW（各家厂商私有格式）
+	".cr2": {kindImage, decMagick, true}, ".cr3": {kindImage, decMagick, true},
+	".nef": {kindImage, decMagick, true}, ".arw": {kindImage, decMagick, true},
+	".dng": {kindImage, decMagick, true}, ".raf": {kindImage, decMagick, true},
+	".rw2": {kindImage, decMagick, true}, ".orf": {kindImage, decMagick, true},
+	".srw": {kindImage, decMagick, true}, ".pef": {kindImage, decMagick, true},
+	".mrw": {kindImage, decMagick, true}, ".erf": {kindImage, decMagick, true},
+	".sr2": {kindImage, decMagick, true}, ".kdc": {kindImage, decMagick, true},
+	".dcr": {kindImage, decMagick, true}, ".rwz": {kindImage, decMagick, true},
+	// 新图片格式
+	".heic": {kindImage, decMagick, true}, ".heif": {kindImage, decMagick, true},
+	".avif": {kindImage, decMagick, true}, ".jxl":  {kindImage, decMagick, true},
+	".psd":  {kindImage, decMagick, true},
+}
+
+// formatOf 查格式注册表。不在表里返回 ok=false（扫描时该文件被忽略）。
+func formatOf(ext string) (FormatDef, bool) {
+	if ext == "" {
+		return FormatDef{}, false
+	}
+	fd, ok := mediaExt[strings.ToLower(ext)]
+	return fd, ok
 }
 
 type ScanProgress struct {
@@ -40,6 +105,8 @@ type Scanner struct {
 	prog     ScanProgress
 	cancel   context.CancelFunc
 	onFinish func()
+	// onChange 扫描进度每次变化时回调（装配时接 Dashboard.Mark(SecScan)）。
+	onChange func()
 }
 
 func NewScanner(db *sql.DB, hub *Hub) *Scanner {
@@ -64,6 +131,11 @@ func (sc *Scanner) set(p ScanProgress) {
 	sc.prog = p
 	sc.mu.Unlock()
 	sc.hub.Broadcast("scan", p)
+	// 扫描进度本身就是一个仪表盘区块，标脏后由增量循环推。
+	// 不在这里直接推 scan 区块，是为了和其余区块走同一条路径（变了才推、且限流）。
+	if sc.onChange != nil {
+		sc.onChange()
+	}
 }
 
 // Start 在后台 goroutine 里扫描。重复调用会先取消上一次。
@@ -255,10 +327,11 @@ func (sc *Scanner) run(ctx context.Context, root string) {
 		}
 
 		ext := strings.ToLower(filepath.Ext(name))
-		kind, ok := mediaExt[ext]
+		fd, ok := mediaExt[ext]
 		if !ok {
 			return nil
 		}
+		kind := fd.Kind
 		var size int64
 		var mtime int64
 		if info, ierr := d.Info(); ierr == nil {

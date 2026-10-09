@@ -1,6 +1,12 @@
 # ---- 构建产物 ----
 *.exe
 *.exe.*
+# 打包输出目录：medreview.exe / admin / mobile / 便携 zip（约 750MB），属本地产物不入库
+dist/
+# ImageMagick 解码器（约 33MB：magick.exe + 配置 xml/icc）随仓库分发，
+# 以便克隆后开箱即用（QC 解 RAW/HEIC/AVIF/JXL/PSD 必需）。
+# 注意：ffmpeg/ffprobe 因体积过大（~210MB）按工具链单独放置、不入库（见下方 tools/ffmpeg/）。
+!tools/imagemagick/magick.exe
 *.bak*
 *.prev
 *.lnk
@@ -11,6 +17,7 @@
 *.db-shm
 *.db-wal
 medreview.log
+server8080.log
 urls.txt
 cache/
 sc/
@@ -22,6 +29,8 @@ tools/ffmpeg/
 
 # ---- 离线演示页：含本机绝对路径与个人照片，不入库 ----
 web_demo/
+# 本机演示素材：个人照片（全家福/春游等）与 demo.db，不入库
+_demo_media/
 
 # ---- 验收脚本目录：只提交脚本与说明，临时素材/运行目录全部忽略 ----
 _verify/**

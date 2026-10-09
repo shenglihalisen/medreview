@@ -127,7 +127,8 @@ def jpg_dims(data):
     return im.size
 
 def start_server(ires):
-    args = [EXE, "-root", SRC, "-token", TOKEN, "-addr", ":%d" % PORT,
+    args = [EXE, "-root", SRC, "-token", TOKEN, "-allow-query-token",
+            "-addr", ":%d" % PORT,
             "-db", os.path.join(RUN, "medreview.db"), "-cache", os.path.join(RUN, "cache"),
             "-ires", str(ires)]
     logf = open(os.path.join(RUN, "server_i%d.log" % ires), "ab")

@@ -1,6 +1,9 @@
 package main
 
 import (
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 type Handler struct {
@@ -24,8 +28,13 @@ type Handler struct {
 	images  *ImageService
 	qc      *QCManager
 	hub     *Hub
+	dash    *Dashboard // 仪表盘增量推送器（见 dashboard.go）
 	dlToken string
 	noToken bool
+	// 允许 ?t=口令 走 URL 鉴权。默认关闭 —— 口令在 URL 里会进浏览器历史、
+	// Referer、代理日志和截图，收益（分享链接不用先登录）远小于风险。
+	// 需要分享时用一次性 share token（见 handleShareToken）。
+	allowQueryToken bool
 
 	// --- 网页控制台用（无黑窗版没有命令行窗口，地址/口令/日志只能在网页里看）---
 	logs        *logRing // 日志环形缓冲，给 /api/console 增量拉
@@ -44,6 +53,30 @@ type Handler struct {
 	// 不节流的话等于每个请求写一次库。
 	usersMu  sync.Mutex
 	userSeen map[string]int64
+
+	// 下载口令登录的失败节流（见 handleDLLogin）。纯内存：服务重启即清零，
+	// 不落盘、不跨实例共享 —— 目的是挡"顺手打个不停"，不是做持久化的审计。
+	dlFailMu   sync.Mutex
+	dlFailures map[string]*dlFailRecord
+
+	// 一次性分享 token（见 handleShareToken）。同样是纯内存、有过期、有次数上限。
+	shareMu sync.Mutex
+	shares  map[string]*shareToken
+}
+
+// shareToken 是一次性下载授权：换取一个只能用 N 次、T 秒后失效的短 token，
+// 用来替代"把主口令塞进 URL"这种做法（口令会进历史、Referer、日志、截图）。
+type shareToken struct {
+	token     string
+	expiresAt time.Time
+	maxUses   int
+	used      int
+}
+
+// dlFailRecord 记录某个来源的口令失败次数与锁定截止时间。
+type dlFailRecord struct {
+	count    int
+	lockedUntil int64 // unix 毫秒；0 = 未锁定
 }
 
 // 历史名字最多记这么多条（最近使用的排在最前）
@@ -52,28 +85,80 @@ const maxRememberedUsers = 20
 // 同一个名字多久之内不重复落库（last_used 只用来排序，精度无所谓）
 const userThrottleSec = 300
 
+// 批注名/审阅人名的长度上限。
+//
+// 为什么必须有上限：名字来自请求头，任何人都能通过 /api/claim 塞任意字符串进来。
+// 而这个名字会进 known_user 表、进认领锁、进仪表盘的「在岗人员」列表（还要原样渲染）。
+// 没有上限时，一个 5000 字符的名字就能撑爆仪表盘布局、把 DB 里 known_user 塞满。
+const maxUserNameRunes = 24
+
+// sanitizeUser 校验并规范化一个批注名，返回 (规范化后的名字, 是否合法)。
+//
+// 规则：
+//   - 去首尾空白；
+//   - 按 **rune** 计数不超过 maxUserNameRunes（按字节数截会把中文名字算成 3 倍，
+//     结果是"张三丰"这种正常名字在 UTF-8 下按字节算是 9，看起来还有余量但语义错了）；
+//   - 不允许含控制字符（换行、制表符、ANSI 转义序列开头）。它们在日志和页面上
+//     能伪造出"多出来的一行内容"，属于典型的日志/UI 注入。
+//
+// 非法时返回 ok=false，让调用方回 400 —— 而不是默默截断了事。默默截断会造出
+// "张三" 和 "张三丰" 被当成两个人、两个认领锁互相看不见这种极难查的问题。
+func sanitizeUser(name string) (string, bool) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", false
+	}
+	if len([]rune(name)) > maxUserNameRunes {
+		return "", false
+	}
+	for _, r := range name {
+		// 控制字符（unicode.IsControl 覆盖 C0/C1 两段）一律拒绝。
+		if unicode.IsControl(r) {
+			return "", false
+		}
+	}
+	return name, true
+}
+
 // rememberUser 记下这次用到的批注名（落库，关掉程序也还记得）。
 // 同一个名字在 userThrottleSec 内只写一次库，避免每个请求都写。
+//
+// 顺带做两件事：
+//  1. 校验名字（见 sanitizeUser）—— 非法名字直接忽略，不入库。这是
+//     known_user 被塞垃圾的入口。
+//  2. 续期该人的目录认领 —— 只要还在活动，目录就不会变成僵尸认领（见 claimRenewSec）。
 func (h *Handler) rememberUser(name string) {
 	name = strings.TrimSpace(name)
 	if name == "" || name == "匿名" || h.store == nil {
 		return
 	}
+	if clean, ok := sanitizeUser(name); ok {
+		name = clean
+	} else {
+		// 非法名字：不落库、不续期，但也不报错 —— 它可能只是某个客户端
+		// 传来的畸形 X-User，不该把整个请求搞挂。
+		return
+	}
 	now := time.Now().Unix()
 	h.usersMu.Lock()
 	last, seen := h.userSeen[name]
-	if seen && now-last < userThrottleSec {
-		h.usersMu.Unlock()
-		return
+	throttled := seen && now-last < userThrottleSec
+	if !throttled {
+		if h.userSeen == nil {
+			h.userSeen = map[string]int64{}
+		}
+		h.userSeen[name] = now
 	}
-	if h.userSeen == nil {
-		h.userSeen = map[string]int64{}
-	}
-	h.userSeen[name] = now
 	h.usersMu.Unlock()
-	if err := h.store.RememberUser(name); err != nil {
-		log.Printf("记住批注名失败: %v", err)
+	if !throttled {
+		if err := h.store.RememberUser(name); err != nil {
+			log.Printf("记住批注名失败: %v", err)
+		}
 	}
+	// 续期不受节流限制：只要人还在动，目录就该保持锁定。
+	// 这条 UPDATE 走主键 (folder_id)，成本极低，但它每次请求都执行 ——
+	// 所以只在真存在认领时才写（RenewClaims 内部先查是否存在）。
+	h.store.RenewClaims(name)
 }
 
 // handleUsers 返回见过的批注名（最近优先）。存库的，重启服务不会丢。
@@ -92,6 +177,64 @@ type Totals struct {
 	Keep    int `json:"keep"`
 	Reject  int `json:"reject"`
 	Pending int `json:"pending"`
+}
+
+// totalsSnapshot 取审阅总数，带 1 秒记忆。
+//
+// 抽成独立函数是为了让 /api/status 和仪表盘的 totals 区块**用同一份口径**。
+// 以前是两处各写一遍同样的 SQL、各自缓存，改了一处忘了另一处，页面上的数字就会
+// 互相矛盾（比如 KPI 说已审 12 张、侧栏说 11 张）。
+func (h *Handler) totalsSnapshot() Totals {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if time.Since(h.totalsT) > time.Second {
+		var t Totals
+		row := h.store.db.QueryRow(`SELECT
+			(SELECT COUNT(*) FROM file),
+			(SELECT COUNT(*) FROM review WHERE decision=1),
+			(SELECT COUNT(*) FROM review WHERE decision=2)`)
+		if err := row.Scan(&t.Files, &t.Keep, &t.Reject); err == nil {
+			t.Pending = t.Files - t.Keep - t.Reject
+			h.totals = t
+			h.totalsT = time.Now()
+		}
+	}
+	return h.totals
+}
+
+// totalsSnapshotOK 和 totalsSnapshot 同一个口径，但**如实报告这次查询有没有成功**。
+//
+// 为什么需要它：totalsSnapshot 在查询失败时会保留上一次的缓存值并返回
+// （对 /api/status 来说"稍旧"好过直接报错）。但仪表盘区块不能这么干 ——
+// 它拿到的值会被当成"刚刚算出来的真相"推给页面。一旦 DB 出问题（文件被锁、
+// 磁盘满、库损坏），页面会**一直显示某个历史时刻的数字，而且看起来完全正常**，
+// 用户据此判断"我刚才打的勾怎么没算进去"。静默的错数字比报错危险得多。
+func (h *Handler) totalsSnapshotOK() (Totals, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if time.Since(h.totalsT) <= time.Second {
+		return h.totals, nil
+	}
+	var t Totals
+	row := h.store.db.QueryRow(`SELECT
+		(SELECT COUNT(*) FROM file),
+		(SELECT COUNT(*) FROM review WHERE decision=1),
+		(SELECT COUNT(*) FROM review WHERE decision=2)`)
+	if err := row.Scan(&t.Files, &t.Keep, &t.Reject); err != nil {
+		return Totals{}, err
+	}
+	t.Pending = t.Files - t.Keep - t.Reject
+	h.totals = t
+	h.totalsT = time.Now()
+	return t, nil
+}
+
+// invalidateTotals 让 1 秒记忆立刻作废。任何改动 review 表的地方都要调，
+// 否则最长要等 1 秒才看到新数字。
+func (h *Handler) invalidateTotals() {
+	h.mu.Lock()
+	h.totalsT = time.Time{}
+	h.mu.Unlock()
 }
 
 func (h *Handler) Routes() http.Handler {
@@ -123,6 +266,14 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /api/vtrans", h.handleVTrans)
 	mux.HandleFunc("GET /api/vtrans-warmup", h.handleVTransWarmup)
 	mux.HandleFunc("GET /api/zip", h.handleZip)
+	// 入口页登录下载页：提交下载口令，比对成功后种 Cookie(mr_dl)，
+	// 之后 canDownload 认 Cookie，下载页才能进/能打包。口令本身仍不下发给页面。
+	mux.HandleFunc("POST /api/dl-login", h.handleDLLogin)
+	// 一次性分享链接：签发（需已登录）与自助换 Cookie。
+	mux.HandleFunc("POST /api/dl-share", h.handleShareToken)
+	mux.HandleFunc("GET /api/dl-share-adopt", h.handleShareAdopt)
+	// 健康检查：给脚本化监控用（DB 可读 / 素材根在 / 转码目录可写）。
+	mux.HandleFunc("GET /api/healthz", h.handleHealthz)
 	mux.HandleFunc("GET /api/export", h.handleExportList)
 	mux.HandleFunc("GET /api/qc-report", h.handleQCReport)
 	mux.HandleFunc("POST /api/copy", h.handleCopy)
@@ -137,7 +288,7 @@ func (h *Handler) Routes() http.Handler {
 	fsrv := http.FileServer(http.FS(webFS))
 	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
-			http.Redirect(w, r, "/review.html", http.StatusFound)
+			http.Redirect(w, r, "/home.html", http.StatusFound)
 			return
 		}
 		// 页面和脚本一律禁用缓存：exe 经常换代，浏览器留着上一版的 review.html
@@ -258,20 +409,184 @@ func requireLoopback(w http.ResponseWriter, r *http.Request) bool {
 
 // canDownload 后端侧的下载权限校验：审阅页即使手动拼接口也会被拒。
 //
-// 口令可能在服务运行期间被**本地窗口**改过（app.SetToken），
-// 所以这里不能直接读字段，要走加锁的 tokenOf。
+// 三条通路，按强度从高到低：
+//  1. -open-dl：完全关闭校验（显式声明的行为，不是默认）。
+//  2. HttpOnly Cookie mr_dl：正常通路。口令由 /api/dl-login 比对后种下，
+//     JS 读不到，URL 里也不出现。
+//  3. 一次性 share token（?s=）：给"把下载页发给同事"用。
+//     它不是主口令，泄露了也只能下载有限次、且很快作废。
+//
+// ⚠️ 主口令走 URL（?t=）的旧通路默认**已关闭**。口令在 URL 里会进浏览器历史、
+// Referer 头、代理/服务器日志、截图和肩窥，任何一处泄露都是长期有效的高权限凭据。
+// 确有需要可加 -allow-query-token 打开，但那是在 knowingly 接受这个风险。
+//
+// 这里的 share token 只做**校验**（存在、未过期、额度未耗尽），**不核销**。
+// 核销单独放在 consumeShareQuota，只由真正把数据交出去的出口调用
+// （zip / export / copy，见 zip.go、copy.go）。预览、翻页这类只是"看一眼"的操作
+// 不该消耗额度 —— 否则同事点开分享链接翻两下页面，10 次额度就没了。
+//
+// 口令可能在服务运行期间被本地窗口改过（app.SetToken），所以走加锁的 tokenOf，
+// 不能直接读字段。
 func (h *Handler) canDownload(r *http.Request) bool {
 	if h.noToken {
 		return true
 	}
 	tok := h.tokenOf()
-	if t := r.URL.Query().Get("t"); t != "" && t == tok {
+	// 常量时间比较，避免通过响应时间逐字节猜口令。
+	// 长度不等也走同一个分支（先比长度只是为了尽早拒绝，不构成时序泄漏：
+	// 口令长度不是秘密，且主口令是定长随机生成的）。
+	if c, err := r.Cookie("mr_dl"); err == nil && len(c.Value) == len(tok) &&
+		subtle.ConstantTimeCompare([]byte(c.Value), []byte(tok)) == 1 {
 		return true
 	}
-	if c, err := r.Cookie("mr_dl"); err == nil && c.Value == tok {
+	if h.allowQueryToken {
+		if t := r.URL.Query().Get("t"); t != "" && len(t) == len(tok) &&
+			subtle.ConstantTimeCompare([]byte(t), []byte(tok)) == 1 {
+			return true
+		}
+	}
+	// 分享 token 的两种带法：URL 上的 ?s=（刚点开链接时），或换成 Cookie 之后的
+	// mr_dl_share（页面 JS 收到 ok:true 后种下的）。后者让 URL 里不再带凭据。
+	if sc, err := r.Cookie("mr_dl_share"); err == nil && h.shareTokenValid(sc.Value) {
 		return true
 	}
-	return false
+	return h.shareTokenValid(r.URL.Query().Get("s"))
+}
+
+// shareTokenValid 只校验分享 token，不消耗额度。
+func (h *Handler) shareTokenValid(tok string) bool {
+	if tok == "" {
+		return false
+	}
+	now := time.Now()
+	h.shareMu.Lock()
+	defer h.shareMu.Unlock()
+	rec, ok := h.shares[tok]
+	if !ok {
+		return false
+	}
+	if now.After(rec.expiresAt) || rec.used >= rec.maxUses {
+		delete(h.shares, tok)
+		return false
+	}
+	return true
+}
+
+// ---------- 一次性分享 token ----------
+
+const (
+	shareTokenTTL   = time.Hour
+	shareTokenUses  = 10
+	shareTokenBytes = 12 // 96 bit 熵，和主口令同规格
+)
+
+// handleShareAdopt 让分享链接的接收方把一次性 token 换成 HttpOnly Cookie。
+//
+// 分享链接里带 ?s=xxx，同一个人点开、翻页、下载都要在 URL 里一直挂着这个 token ——
+// 而 token 会随 Referer 漏给页面里引用的任何外部资源。换成 Cookie 后 URL 就干净了，
+// 而且额度只在真正下载时核销（见 canDownload 顶部说明）。
+func (h *Handler) handleShareAdopt(w http.ResponseWriter, r *http.Request) {
+	tok := r.URL.Query().Get("s")
+	if !h.shareTokenValid(tok) {
+		writeJSON(w, map[string]any{"ok": false, "msg": "分享链接无效或已过期"})
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     "mr_dl_share",
+		Value:    tok,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   int(shareTokenTTL / time.Second),
+	})
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// handleHealthz 健康检查。返回 200 表示一切正常，503 表示数据库或素材根不可用。
+// 放在独立端点而不是只塞进仪表盘，是为了让监控脚本能一把判断，不用解析页面结构。
+func (h *Handler) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	v, err := h.calcHealth()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	m, _ := v.(map[string]any)
+	code := http.StatusOK
+	if ok, _ := m["ok"].(bool); !ok {
+		code = http.StatusServiceUnavailable
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(m)
+}
+
+// handleShareToken 签发一次性下载 token。
+//
+// 必须已通过 canDownload（也就是得先有 Cookie 或 -open-dl），否则就成了
+// "任何人都能给自己签发下载凭据"。返回的 token 只在 URL 里短暂有效，
+// 用满次数或过期即失效，且不能用来再签发新的。
+func (h *Handler) handleShareToken(w http.ResponseWriter, r *http.Request) {
+	if !h.canDownload(r) {
+		http.Error(w, "请先登录下载页", http.StatusForbidden)
+		return
+	}
+	buf := make([]byte, shareTokenBytes)
+	if _, err := rand.Read(buf); err != nil {
+		http.Error(w, "无法生成随机 token", http.StatusInternalServerError)
+		return
+	}
+	t := hex.EncodeToString(buf)
+	exp := time.Now().Add(shareTokenTTL)
+	h.shareMu.Lock()
+	if h.shares == nil {
+		h.shares = map[string]*shareToken{}
+	}
+	h.gcSharesLocked(time.Now())
+	h.shares[t] = &shareToken{token: t, expiresAt: exp, maxUses: shareTokenUses}
+	h.shareMu.Unlock()
+	rel := shareTokenTTL / time.Hour
+	writeJSON(w, map[string]any{
+		"token": t, "expiresAt": exp.Unix(), "maxUses": shareTokenUses,
+		"url": "/download.html?s=" + t,
+		"note": fmt.Sprintf("此链接最多可用 %d 次、%d 小时后失效；不要转发给无关的人", shareTokenUses, rel),
+	})
+}
+
+// consumeShareQuota 核销一次分享额度。**只在真正把数据交出去的出口调用**
+// （/api/zip、/api/export、/api/copy）—— 见 canDownload 顶部关于"校验 vs 核销"的说明。
+//
+// 调用方必须已经过了 canDownload；这里只处理 share token 这一条通路
+// （走 Cookie 或主口令的请求本来就不限次，不该被这里误伤）。
+func (h *Handler) consumeShareQuota(r *http.Request) {
+	tok := r.URL.Query().Get("s")
+	if tok == "" {
+		return
+	}
+	now := time.Now()
+	h.shareMu.Lock()
+	defer h.shareMu.Unlock()
+	rec, ok := h.shares[tok]
+	if !ok {
+		return
+	}
+	if now.After(rec.expiresAt) {
+		delete(h.shares, tok)
+		return
+	}
+	if rec.used >= rec.maxUses {
+		delete(h.shares, tok) // 次数用尽即作废，不给"下次再来"留机会
+		return
+	}
+	rec.used++
+}
+
+// gcSharesLocked 清理过期条目。调用方必须已持有 shareMu。
+func (h *Handler) gcSharesLocked(now time.Time) {
+	for k, v := range h.shares {
+		if now.After(v.expiresAt) {
+			delete(h.shares, k)
+		}
+	}
 }
 
 // tokenOf / setToken 读写下载口令。
@@ -293,22 +608,126 @@ func writeJSON(w http.ResponseWriter, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
-	var t Totals
-	h.mu.Lock()
-	if time.Since(h.totalsT) > time.Second {
-		row := h.store.db.QueryRow(`SELECT
-			(SELECT COUNT(*) FROM file),
-			(SELECT COUNT(*) FROM review WHERE decision=1),
-			(SELECT COUNT(*) FROM review WHERE decision=2)`)
-		if err := row.Scan(&t.Files, &t.Keep, &t.Reject); err == nil {
-			t.Pending = t.Files - t.Keep - t.Reject
-			h.totals = t
-			h.totalsT = time.Now()
-		}
+// handleDLLogin 校验下载口令：成功种 Cookie(mr_dl)，失败返回 ok:false。
+// Cookie 走 canDownload 已有的校验分支，不需要改动打包下载的任何逻辑。
+// Cookie 设 HttpOnly + SameSite=Lax：本机同源使用，且不给 JS 读（避免页面把口令取走）。
+//
+// 两道加固（针对"攻击者反复试口令 / 跨站诱导提交"）：
+//  1. Origin 白名单：非本机/局域网来源的带 Origin 请求直接 403，
+//     挡掉恶意网页用表单诱导浏览器 POST（CSRF）。无 Origin 的（curl、同源某些情况）放行。
+//  2. 失败节流：同一来源连续错 5 次锁 30 秒，返回 Retry-After。
+//     口令本身是 96bit 随机（randomToken），爆破不现实；节流是为了不让这个端点
+//     变成"随便打"的探测口，也让 CPU 打满变得困难。
+func (h *Handler) handleDLLogin(w http.ResponseWriter, r *http.Request) {
+	if h.noToken {
+		// 没启用口令：直接放行，种一个空 cookie 也无意义，返回 ok 让前端进
+		writeJSON(w, map[string]any{"ok": true})
+		return
 	}
-	t = h.totals
-	h.mu.Unlock()
+	// —— 加固1：Origin 白名单 ——
+	if origin := r.Header.Get("Origin"); origin != "" && !localOrigin(origin) {
+		http.Error(w, "跨站请求不被允许", http.StatusForbidden)
+		return
+	}
+	// —— 加固2：失败节流 ——
+	key := loginThrottleKey(r)
+	if wait := h.dlLockedFor(key); wait > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
+		writeJSON(w, map[string]any{"ok": false, "msg": fmt.Sprintf("尝试过多，请 %d 秒后再试", int(wait.Seconds())+1)})
+		return
+	}
+	var req struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "请求格式不对", http.StatusBadRequest)
+		return
+	}
+	tok := h.tokenOf()
+	// 比对：不要用 == 直接比（时序侧信道），长度不等也要走到同一分支
+	if len(req.Token) != len(tok) || subtle.ConstantTimeCompare([]byte(req.Token), []byte(tok)) != 1 {
+		h.dlNoteFailure(key)
+		writeJSON(w, map[string]any{"ok": false, "msg": "口令不正确"})
+		return
+	}
+	h.dlClearFailures(key)
+	http.SetCookie(w, &http.Cookie{
+		Name:     "mr_dl",
+		Value:    tok,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// loginThrottleKey 用来源 IP 做节流键。取 RemoteAddr 的 host 部分，
+// 剥掉端口（IPv6 形如 [::1]:1234）。取不到就退回一个固定键（宁可一起锁，也不放过）。
+func loginThrottleKey(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+const (
+	dlFailMax    = 5              // 连续错 5 次就锁
+	dlLockWindow = 30 * time.Second // 锁 30 秒
+)
+
+// dlLockedFor 返回还需等待多久（0 = 未锁定）。
+func (h *Handler) dlLockedFor(key string) time.Duration {
+	h.dlFailMu.Lock()
+	defer h.dlFailMu.Unlock()
+	if h.dlFailures == nil {
+		return 0
+	}
+	rec, ok := h.dlFailures[key]
+	if !ok || rec.lockedUntil == 0 {
+		return 0
+	}
+	left := time.Until(time.UnixMilli(rec.lockedUntil))
+	if left <= 0 {
+		// 锁到期：清掉这个键，下一次重新计数
+		delete(h.dlFailures, key)
+		return 0
+	}
+	return left
+}
+
+// dlNoteFailure 记一次失败；达到阈值就锁。锁定期内的再次失败不重复延长锁定。
+func (h *Handler) dlNoteFailure(key string) {
+	h.dlFailMu.Lock()
+	defer h.dlFailMu.Unlock()
+	if h.dlFailures == nil {
+		h.dlFailures = map[string]*dlFailRecord{}
+	}
+	rec, ok := h.dlFailures[key]
+	if !ok {
+		rec = &dlFailRecord{}
+		h.dlFailures[key] = rec
+	}
+	// 还在锁定期内：不动（不让攻击者靠持续失败无限延长锁定）
+	if rec.lockedUntil > time.Now().UnixMilli() {
+		return
+	}
+	rec.count++
+	if rec.count >= dlFailMax {
+		rec.lockedUntil = time.Now().Add(dlLockWindow).UnixMilli()
+		rec.count = 0
+	}
+}
+
+// dlClearFailures 登录成功：清空该来源的失败记录。
+func (h *Handler) dlClearFailures(key string) {
+	h.dlFailMu.Lock()
+	defer h.dlFailMu.Unlock()
+	delete(h.dlFailures, key)
+}
+
+func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
+	t := h.totalsSnapshot()
 
 	// 注意两件事：
 	//  1. token 本身不回传给页面，否则审阅页能拿到就等于没有权限校验；
@@ -323,44 +742,18 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleDashboard 给站长管理仪表盘用的聚合快照：总览 / 媒体构成 / 目录认领 / 在岗人员 /
-// 质量概况 / 扫描状态。同源页面直连，无 CORS 问题；与 /api/status 一样不鉴权（局域网管理视图）。
+// handleDashboard 给管理仪表盘用的**全量**快照。
+//
+// 现在它只是增量体系的一个兜底入口：正常情况下页面在 SSE 建连时就拿到全量了，
+// 之后只收 `dash` 事件（单区块）。这个接口保留的价值有三个：
+//   - 页面首屏在 SSE 尚未建好时也能渲染（不出现空白）；
+//   - 断线重连后可以重新对账；
+//   - 验收脚本 / 外部监控可以一次性拉全。
+//
+// 各区块的计算全部走 dashboard.go 的 calc*，保证「HTTP 拉的」和「SSE 推的」
+// 是同一套代码算出来的，不会两套口径。
 func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
-	var t Totals
-	h.mu.Lock()
-	if time.Since(h.totalsT) > time.Second {
-		row := h.store.db.QueryRow(`SELECT
-			(SELECT COUNT(*) FROM file),
-			(SELECT COUNT(*) FROM review WHERE decision=1),
-			(SELECT COUNT(*) FROM review WHERE decision=2)`)
-		if err := row.Scan(&t.Files, &t.Keep, &t.Reject); err == nil {
-			t.Pending = t.Files - t.Keep - t.Reject
-			h.totals = t
-			h.totalsT = time.Now()
-		}
-	}
-	t = h.totals
-	h.mu.Unlock()
-
-	var photo, video, pend, done, folTotal, folClaimed int
-	_ = h.store.db.QueryRow(`SELECT COUNT(*) FROM file WHERE kind=? AND present=1`, kindImage).Scan(&photo)
-	_ = h.store.db.QueryRow(`SELECT COUNT(*) FROM file WHERE kind=? AND present=1`, kindVideo).Scan(&video)
-	_ = h.store.db.QueryRow(`SELECT COUNT(*) FROM file WHERE processed=0 AND present=1`).Scan(&pend)
-	_ = h.store.db.QueryRow(`SELECT COUNT(*) FROM file WHERE processed=1 AND present=1`).Scan(&done)
-	_ = h.store.db.QueryRow(`SELECT COUNT(*) FROM folder`).Scan(&folTotal)
-	_ = h.store.db.QueryRow(`SELECT COUNT(*) FROM claim`).Scan(&folClaimed)
-
-	workers, _ := h.store.ActiveWorkers(time.Now().UnixMilli() - 5*60*1000)
-	qcStat, _ := h.store.QCStatsAll()
-
-	writeJSON(w, map[string]any{
-		"totals":  t,
-		"media":   map[string]any{"photo": photo, "video": video, "processedPending": pend, "processedDone": done},
-		"folders": map[string]any{"total": folTotal, "claimed": folClaimed, "unclaimed": folTotal - folClaimed},
-		"workers": map[string]any{"count": len(workers), "list": workers},
-		"qc":      qcStat,
-		"scan":    h.scanner.Progress(),
-	})
+	writeJSON(w, h.dash.Full())
 }
 
 func (h *Handler) handleScan(w http.ResponseWriter, r *http.Request) {
@@ -605,9 +998,8 @@ func (h *Handler) applyDecision(w http.ResponseWriter, r *http.Request, ids []in
 			same++ // 目标状态与现状相同，无需写 —— 这不是被锁，绝不能报"被他人认领"
 		}
 	}
-	h.mu.Lock()
-	h.totalsT = time.Time{}
-	h.mu.Unlock()
+	h.invalidateTotals()
+	h.dash.Mark(SecTotals)
 	// changed 保留：老调用方只看它。blocked/same/missing 给前端区分"为什么没变"。
 	// 三个批量按钮的 ids 全部来自当前目录（本层），认领锁按"文件直接所属目录"判，
 	// 所以 blocked 要么 0 要么等于总数，前端按计数分支就够，不需要明细列表。
@@ -664,9 +1056,8 @@ func (h *Handler) handleReviewClearFolder(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	h.mu.Lock()
-	h.totalsT = time.Time{} // 与 applyDecision 一致，让 /api/status 立刻重算
-	h.mu.Unlock()
+	h.invalidateTotals() // 与 applyDecision 一致，让 /api/status 立刻重算
+	h.dash.Mark(SecTotals)
 
 	// 聚合广播：一条事件代表"整个目录被清空"，绝不逐文件广播。
 	// 这条事件是幂等的终态描述，重复收到无副作用；即使被丢掉，
@@ -722,9 +1113,8 @@ func (h *Handler) handleReviewFolderDecision(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	h.mu.Lock()
-	h.totalsT = time.Time{} // 与 applyDecision 一致，让 /api/status 立刻重算
-	h.mu.Unlock()
+	h.invalidateTotals() // 与 applyDecision 一致，让 /api/status 立刻重算
+	h.dash.Mark(SecTotals)
 
 	// 聚合广播：一条事件代表"整个目录被标为 X"，绝不逐文件广播（几十上百条会刷爆 SSE）。
 	h.hub.Broadcast("folder-decision", map[string]any{
@@ -747,6 +1137,13 @@ func (h *Handler) canEdit(f *FileItem, user string) bool {
 	return false
 }
 
+// claimRenewSec 认领续期窗口：超过这个时间没有任何动作，claim 就算僵尸（见 staleClaimMs）。
+//
+// 以前 claim 一旦写入就永远有效，人临时走开目录就一直被锁着，只能手动释放。
+// 现在每次带 X-User 的请求都会顺手续期（见 rememberUser → RenewClaims），
+// 目录会随人的实际活动保持/失去锁定，不用人工干预。
+const claimRenewSec = 30 * 60
+
 func (h *Handler) handleClaim(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		FolderID int64  `json:"folderId"`
@@ -759,28 +1156,60 @@ func (h *Handler) handleClaim(w http.ResponseWriter, r *http.Request) {
 	if req.User == "" {
 		req.User = userOf(r)
 	}
-	err := h.store.ClaimFolder(req.FolderID, req.User)
-	h.rememberUser(req.User)
+	name, ok := sanitizeUser(req.User)
+	if !ok {
+		http.Error(w, "名字不合法：最多 24 个字符，且不能只含空格或控制字符", http.StatusBadRequest)
+		return
+	}
+	ok2, err := h.store.ClaimFolder(req.FolderID, name)
+	h.rememberUser(name)
 	// 认领一直是"点了没反应"的头号嫌疑，这里留一行可追溯的日志：
 	// rawXUser 是前端原始请求头（编码过），req.User 是解码后的名字。
-	log.Printf("[claim] folder=%d user=%q rawXUser=%q err=%v", req.FolderID, req.User, r.Header.Get("X-User"), err)
+	log.Printf("[claim] folder=%d user=%q rawXUser=%q ok=%v err=%v", req.FolderID, name, r.Header.Get("X-User"), ok2, err)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	h.hub.Broadcast("claim", map[string]any{"folderId": req.FolderID, "user": req.User})
+	if !ok2 {
+		// 已被他人认领：明确告诉前端（前端提示"已被 X 认领"），
+		// 而不是静默成功 —— 静默会让两个人都以为自己拿到了这个目录。
+		owner, _ := h.store.ClaimOf(req.FolderID)
+		writeJSON(w, map[string]any{"ok": false, "owner": owner, "msg": "该目录已被 " + owner + " 认领"})
+		return
+	}
+	h.hub.Broadcast("claim", map[string]any{"folderId": req.FolderID, "user": name})
+	h.dash.Mark(SecFolders, SecWorkers)
 	writeJSON(w, map[string]any{"ok": true})
 }
 
 func (h *Handler) handleRelease(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		FolderID int64 `json:"folderId"`
+		Force    bool  `json:"force"` // true = 强制释放别人的僵尸认领
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 	user := userOf(r)
+	// 强制释放是给仪表盘用的：只允许摘掉**僵尸**认领（超过 staleClaimMs 无动作），
+	// 否则任何人都能抢走一个正在被审的目录 —— 那等于绕过了整个认领锁。
+	if req.Force {
+		ok, owner, err := h.store.ForceReleaseStale(req.FolderID, staleClaimMs)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if !ok {
+			writeJSON(w, map[string]any{"ok": false, "msg": "该目录的认领还" + "在活动期内，不能强制释放"})
+			return
+		}
+		log.Printf("[claim] force-release folder=%d by=%q previousOwner=%q", req.FolderID, user, owner)
+		h.hub.Broadcast("claim", map[string]any{"folderId": req.FolderID, "user": ""})
+		h.dash.Mark(SecFolders, SecWorkers)
+		writeJSON(w, map[string]any{"ok": true, "released": owner})
+		return
+	}
 	err := h.store.ReleaseFolder(req.FolderID, user)
 	h.rememberUser(user)
 	log.Printf("[claim] release folder=%d user=%q rawXUser=%q err=%v", req.FolderID, user, r.Header.Get("X-User"), err)
@@ -789,6 +1218,7 @@ func (h *Handler) handleRelease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.hub.Broadcast("claim", map[string]any{"folderId": req.FolderID, "user": ""})
+	h.dash.Mark(SecFolders, SecWorkers)
 	writeJSON(w, map[string]any{"ok": true})
 }
 
@@ -829,6 +1259,8 @@ func (h *Handler) handleMedia(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "当前页面无下载权限", http.StatusForbidden)
 			return
 		}
+		// 单文件下载也是出口，分享额度在这里核销。
+		h.consumeShareQuota(r)
 		if f.Decision != decisionKeep {
 			http.Error(w, "该文件没有标记为「保留」，不能下载", http.StatusForbidden)
 			return

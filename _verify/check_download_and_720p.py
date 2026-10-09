@@ -130,6 +130,7 @@ def start():
     global PROC
     lf = open(os.path.join(RUN, 'server.log'), 'w', encoding='utf-8', newline='')
     p = subprocess.Popen([EXE, '-root', MAT, '-addr', ':%d' % PORT, '-token', TOKEN,
+                          '-allow-query-token',  # harness uses ?t= query token; opt into query-token mode
                           '-db', 'v.db', '-cache', CACHE, '-vres', '720'],
                          cwd=RUN, stdout=lf, stderr=subprocess.STDOUT)
     PROC = p
@@ -162,7 +163,7 @@ def wait_warmup(limit=900):
             return {'active': False, 'total': 0, 'needConv': 0, 'done': 0,
                     'skipped': 0, 'cached': 0, 'failed': 0, 'note': 'server exited'}
         try:
-            w = request('/api/vtrans-warmup')
+            w = request('/api/vtrans-warmup?t=%s' % TOKEN)
         except Exception as e:
             print('  !! 查预热进度失败: %r' % e)
             time.sleep(1)
@@ -179,7 +180,7 @@ def wait_warmup(limit=900):
             return {'active': False, 'total': 0, 'needConv': 0, 'done': 0,
                     'skipped': 0, 'cached': 0, 'failed': 0, 'note': 'server exited'}
         try:
-            w = request('/api/vtrans-warmup')
+            w = request('/api/vtrans-warmup?t=%s' % TOKEN)
         except Exception as e:
             print('  !! 查预热进度失败: %r' % e)
             time.sleep(1)
@@ -187,7 +188,7 @@ def wait_warmup(limit=900):
         if not w.get('active'):
             return w
         time.sleep(2)
-    return request('/api/vtrans-warmup')
+    return request('/api/vtrans-warmup?t=%s' % TOKEN)
 
 
 def fresh_dir(path):
@@ -365,6 +366,7 @@ def main():
                 p.kill()
             lf = open(os.path.join(RUN, tag + '.log'), 'w', encoding='utf-8', newline='')
             q = subprocess.Popen([EXE, '-root', MAT, '-addr', ':%d' % PORT, '-token', TOKEN,
+                                  '-allow-query-token',  # harness uses ?t= query token; opt into query-token mode
                                   '-db', 'v.db', '-cache', CACHE] + extra,
                                  cwd=RUN, stdout=lf, stderr=subprocess.STDOUT)
             PROC = q
@@ -422,6 +424,7 @@ def main():
         guard = seed('guard_product.mp4', 4096)
         lf3 = open(os.path.join(RUN, 'server_dup.log'), 'w', encoding='utf-8', newline='')
         dup = subprocess.Popen([EXE, '-root', MAT, '-addr', ':%d' % PORT, '-token', TOKEN,
+                                '-allow-query-token',  # harness uses ?t= query token; opt into query-token mode
                                 '-db', 'v.db2', '-cache', CACHE, '-vres', '720'],
                                cwd=RUN, stdout=lf3, stderr=subprocess.STDOUT)
         rc = None

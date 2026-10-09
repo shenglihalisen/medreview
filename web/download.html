@@ -42,6 +42,13 @@
 })();
 /* ===== 手机版/电脑版判定（END） ===== */
 </script>
+<style>
+/* 顶部「← 入口」按钮：用 <a> 实现的，复用 .btn 外观并补齐对齐 */
+#toolbar .home-btn {
+  display: inline-flex; align-items: center; text-decoration: none;
+  white-space: nowrap;
+}
+</style>
 </head>
 <body>
 <div id="app">
@@ -55,6 +62,7 @@
 
   <div id="main">
     <div id="toolbar">
+      <a class="btn home-btn" href="/home.html" title="返回入口页">← 入口</a>
       <span class="mode-badge mode-dl" title="此页面可对已标记的文件打包 / 导出下载">下载模式 · 可标记 / 打包下载</span>
       <span class="crumb" id="crumb">素材</span>
       <span id="slot-cols"></span>

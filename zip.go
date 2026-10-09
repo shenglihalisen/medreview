@@ -28,6 +28,8 @@ func (h *Handler) handleZip(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "当前页面无下载权限", http.StatusForbidden)
 		return
 	}
+	// 分享链接的额度只在真正把数据交出去时核销（预览不消耗）。
+	h.consumeShareQuota(r)
 	folderID, _ := strconv.ParseInt(r.URL.Query().Get("folder"), 10, 64)
 	if folderID <= 0 {
 		http.Error(w, "缺少 folder 参数", http.StatusBadRequest)
@@ -233,6 +235,8 @@ func (h *Handler) handleExportList(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "当前页面无下载权限", http.StatusForbidden)
 		return
 	}
+	// 分享链接的额度只在真正把数据交出去时核销（预览不消耗）。
+	h.consumeShareQuota(r)
 	folderID, _ := strconv.ParseInt(r.URL.Query().Get("folder"), 10, 64)
 	if folderID <= 0 {
 		http.Error(w, "缺少 folder 参数", http.StatusBadRequest)
@@ -268,6 +272,8 @@ func (h *Handler) handleQCReport(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "当前页面无下载权限", http.StatusForbidden)
 		return
 	}
+	// 分享链接的额度只在真正把数据交出去时核销（预览不消耗）。
+	h.consumeShareQuota(r)
 	folderID, _ := strconv.ParseInt(r.URL.Query().Get("folder"), 10, 64)
 	if folderID <= 0 {
 		http.Error(w, "缺少 folder 参数", http.StatusBadRequest)

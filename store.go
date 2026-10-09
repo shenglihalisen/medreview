@@ -174,12 +174,34 @@ func (s *Store) MetaGet(k string) string { return metaGet(s.db, k) }
 func (s *Store) MetaSet(k, v string) error { return metaSet(s.db, k, v) }
 
 // absPath 把相对索引路径还原成磁盘绝对路径。
+//
+// 两个要点：
+//
+//  1. **出界校验（Zip Slip 防御）**：filepath.Join 会 Clean，rel 里带 ".." 就能直接
+//     逃出素材根。目前 rel 的唯一来源是 scanner 扫描时的 filepath.Rel（按定义不含 ..），
+//     但 medreview.db 是明文 SQLite、就在 exe 同目录 —— 一旦它被改写（备份还原、
+//     被人投放、以后新增写 rel_path 的功能），一个 "../../../Windows/win.ini" 就能
+//     读出根外任意文件。所以这里做最后一道校验：拼完再确认仍在根下，
+//     不在就退化成根目录本身（宁可读不到，也不给穿越）。
+//
+//  2. **加读锁**：root 有 rootMu 保护（SetRoot 换目录时会有并发写），Root() 正确加了
+//     RLock，这里原来裸读 s.root，等于把已经修好的数据竞争又引了回来 ———
+//     这函数是全部文件读取的唯一入口。
 func (s *Store) absPath(rel string) string {
+	root := s.Root() // 带读锁
+	if root == "" {
+		return ""
+	}
 	rel = strings.TrimPrefix(rel, "./")
 	if rel == "" || rel == "." {
-		return s.root
+		return root
 	}
-	return filepath.Join(s.root, filepath.FromSlash(rel))
+	p := filepath.Join(root, filepath.FromSlash(rel))
+	// p 必须在 root 之下。filepath.Rel 返回以 ".." 开头即表示已逃出。
+	if r, err := filepath.Rel(root, p); err != nil || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+		return root
+	}
+	return p
 }
 
 // loadStats 一次性算出所有目录的自身计数与父子关系，再由调用方做递归汇总。
@@ -707,16 +729,90 @@ func (s *Store) FilesInFolders(folderIDs []int64) ([]FileItem, error) {
 	return out, rows.Err()
 }
 
-func (s *Store) ClaimFolder(folderID int64, user string) error {
-	_, err := s.db.Exec(`INSERT INTO claim(folder_id, user_name, claimed_at) VALUES(?,?,?)
-		ON CONFLICT(folder_id) DO UPDATE SET user_name=excluded.user_name, claimed_at=excluded.claimed_at`,
-		folderID, user, time.Now().Unix())
-	return err
+// ClaimFolder 认领（或续期）一个目录。
+//
+// ⚠️ ON CONFLICT 的 DO UPDATE 必须带 `WHERE claim.user_name = excluded.user_name`：
+// 没有这个 WHERE 的话，DO UPDATE 会**无条件覆盖**已有认领人 —— 局域网里任何人都能
+// 一条 POST 抢走别人的目录（user 名还能随便填成对方的名字），协作语义直接崩掉。
+// 带上 WHERE 后，只有「当前无人认领」或「本来就是自己认领的」两种情况能写入。
+//
+// 返回值：ok=true 表示成功；ok=false 表示这个目录已被他人认领（调用方应回 409）。
+func (s *Store) ClaimFolder(folderID int64, user string) (bool, error) {
+	// claimed_at 一律用 **Unix 毫秒**。RenewClaims / ForceReleaseStale / 仪表盘的
+	// 僵尸判定都按毫秒算（毫秒精度下 30 分钟窗口不会被"同一秒内"这种边界误判）。
+	// 以前这里是 Unix() 秒 —— 一旦有个地方按毫秒读，就会算出"1970 年就过期了"的
+	// 荒谬结论（或者反过来，永远不过期）。单位必须统一。
+	res, err := s.db.Exec(`INSERT INTO claim(folder_id, user_name, claimed_at) VALUES(?,?,?)
+		ON CONFLICT(folder_id) DO UPDATE SET claimed_at=excluded.claimed_at
+		WHERE claim.user_name = excluded.user_name`,
+		folderID, user, time.Now().UnixMilli())
+	if err != nil {
+		return false, err
+	}
+	// 影响行数 0 = WHERE 不成立（被别人占着）
+	n, err := res.RowsAffected()
+	if err != nil {
+		return true, nil // 拿不到行数就当成功，不因为这个误报
+	}
+	return n > 0, nil
 }
 
 func (s *Store) ReleaseFolder(folderID int64, user string) error {
 	_, err := s.db.Exec(`DELETE FROM claim WHERE folder_id=? AND (user_name=? OR ?='')`, folderID, user, user)
 	return err
+}
+
+// RenewClaims 给这个人的所有认领续期（把 claimed_at 推到现在）。
+//
+// 为什么需要：以前 claim 一旦写入就永久有效，人临时走开（接电话、开会），
+// 目录就一直被锁着，别人只能找管理者手动释放。现在"还在活动"就自动保持锁定，
+// 真的离开超过 staleClaimMs 才会被算作僵尸认领（可由仪表盘强制释放）。
+//
+// 只在**确实持有认领**时才写：先问一句"有没有"，没有就不动。
+// 这条路径在每个带 X-User 的请求末尾都会走一遍，不能每次都去 UPDATE。
+func (s *Store) RenewClaims(user string) {
+	if user == "" {
+		return
+	}
+	var n int64
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM claim WHERE user_name=?`, user).Scan(&n); err != nil || n == 0 {
+		return
+	}
+	_, _ = s.db.Exec(`UPDATE claim SET claimed_at=? WHERE user_name=?`, time.Now().UnixMilli(), user)
+}
+
+// ForceReleaseStale 强制释放一个**僵尸**认领：只有当该目录的认领超过 staleMs
+// 没有任何动作时才允许摘掉。
+//
+// 这是"解锁"和"抢锁"的分界线 —— 普通 ReleaseFolder 只认自己的（或管理员清空），
+// 而这里允许摘掉别人的，但仅限它已经死了。如果不卡 staleMs，任何人都能把一个
+// 正在被审的目录抢走，整个认领锁就形同虚设。
+//
+// 返回 (是否释放成功, 原认领人, 错误)。原认领人用于日志与页面提示。
+func (s *Store) ForceReleaseStale(folderID int64, staleMs int64) (bool, string, error) {
+	cutoff := time.Now().UnixMilli() - staleMs
+	var owner string
+	err := s.db.QueryRow(
+		`SELECT user_name FROM claim WHERE folder_id=? AND claimed_at < ?`, folderID, cutoff).Scan(&owner)
+	if err == sql.ErrNoRows {
+		return false, "", nil // 没人认领，或者还在活动期内 → 拒绝
+	}
+	if err != nil {
+		return false, "", err
+	}
+	// DELETE 再带一次 stale 条件：防止"查完到删之间"刚好被人续期，
+	// 那样会把一个刚刚活过来的认领误删掉。
+	res, err := s.db.Exec(
+		`DELETE FROM claim WHERE folder_id=? AND user_name=? AND claimed_at < ?`,
+		folderID, owner, cutoff)
+	if err != nil {
+		return false, owner, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, owner, err
+	}
+	return n > 0, owner, nil
 }
 
 // ClaimOf 返回某个目录的认领人；没人认领时返回空串。

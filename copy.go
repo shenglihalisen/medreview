@@ -22,6 +22,8 @@ func (h *Handler) handleCopy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "当前页面无下载权限", http.StatusForbidden)
 		return
 	}
+	// 分享链接的额度只在真正把数据交出去时核销（目录浏览不消耗）。
+	h.consumeShareQuota(r)
 	var req struct {
 		FolderID  int64  `json:"folderId"`
 		Recursive bool   `json:"recursive"`
