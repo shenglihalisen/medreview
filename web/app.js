@@ -581,6 +581,11 @@
   function selectFolder(id) {
     S.folderId = id;
     clearPool();
+    // 竖屏：选完目录顺手收起文件树抽屉（否则抽屉盖住刚切好的列表）。
+    // 横屏树是常驻的，不受影响 —— 这里只操作 drawer-open 这个仅竖屏才有的类。
+    if (document.documentElement.classList.contains("drawer-open")) {
+      document.documentElement.classList.remove("drawer-open");
+    }
     return api("/api/folder?folder=" + id).then(function (d) {
       var n = d.folder;
       S.folderName = n.name;
@@ -1819,6 +1824,90 @@
     }, true);
   }
 
+  // ---------- 手机竖屏（portrait） ----------
+  //
+  // 落地 docs/design/mobile-portrait.md。横屏布局完全不动，这里只给竖屏补三件事：
+  //   ① 顶部「建议横屏」提示条：可关闭，关闭后本次会话不再出现（不再硬锁竖屏）；
+  //   ② 左侧文件树抽屉：☰ 打开，点遮罩/选完目录/左滑关闭；
+  //   ③ 底部操作条：复用横屏那三个「本页…」按钮的同一套处理逻辑，不复制业务规则。
+  //
+  // 全部用 .portrait + is-phone 双限定，横屏/桌面一个都不会命中。
+  function isPortrait() {
+    return IS_PHONE && document.documentElement.classList.contains("portrait");
+  }
+
+  function bindPortrait() {
+    if (!IS_PHONE) return;
+    var html = document.documentElement;
+
+    // ① 竖屏提示条：默认显示（HTML 里是 hidden，这里按需取消），
+    //    用户点「继续竖屏」后记住选择，下次进来不再打扰。
+    var gate = $("rotate-gate");
+    if (gate) {
+      var KEY = "mr_portrait_hint_off";
+      var off = false;
+      try { off = localStorage.getItem(KEY) === "1"; } catch (e) {}
+      if (off || !isPortrait()) {
+        gate.hidden = true;
+        html.classList.add("no-gate");
+      } else {
+        gate.hidden = false;
+        var dis = $("rotate-dismiss");
+        if (dis) dis.onclick = function () {
+          gate.hidden = true;
+          html.classList.add("no-gate");
+          try { localStorage.setItem(KEY, "1"); } catch (e) {}
+        };
+      }
+    }
+
+    // ③ 底部操作条：直接转调横屏那几个按钮的 onclick，
+    //    业务规则（范围口径、确认弹窗）保持只有一份实现，不会两处跑偏。
+    [
+      ["pb-all-keep", "btn-all-keep"],
+      ["pb-all-reject", "btn-all-reject"],
+      ["pb-clear", "btn-clear"],
+    ].forEach(function (pair) {
+      var src = $(pair[1]);
+      var dst = $(pair[0]);
+      // 横屏侧按钮不存在（下载页没这三个）时静默跳过
+      if (src && dst) dst.onclick = function () { src.onclick(); };
+    });
+
+    if (!isPortrait()) return;
+
+    // ② 文件树抽屉
+    var mask = $("drawer-mask");
+    function setDrawer(open) {
+      html.classList.toggle("drawer-open", open);
+    }
+    var btnDrawer = $("btn-drawer");
+    if (btnDrawer) btnDrawer.onclick = function () { setDrawer(true); };
+    if (mask) mask.onclick = function () { setDrawer(false); };
+
+    // 左边缘右滑打开：从 x<24 起手、横滑超过 48px 才算（避免与竖向滚动打架）
+    var tsx = 0, tsy = 0, tracking = false;
+    document.addEventListener("touchstart", function (e) {
+      if (!isPortrait() || !e.touches || e.touches.length !== 1) return;
+      var t = e.touches[0];
+      if (html.classList.contains("drawer-open")) return; // 已开着就不跟手
+      tsx = t.clientX; tsy = t.clientY;
+      tracking = tsx < 24; // 只从左边缘起手
+    }, { passive: true });
+    document.addEventListener("touchmove", function (e) {
+      if (!tracking || !e.touches || e.touches.length !== 1) return;
+      var t = e.touches[0];
+      var dx = t.clientX - tsx, dy = Math.abs(t.clientY - tsy);
+      if (dx > 48 && dx > dy * 1.5) { setDrawer(true); tracking = false; }
+    }, { passive: true });
+    document.addEventListener("touchend", function () { tracking = false; }, { passive: true });
+
+    // 旋转屏幕时关掉抽屉：横屏布局里树是常驻的，抽屉留着会挡内容
+    window.addEventListener("orientationchange", function () {
+      setTimeout(function () { setDrawer(false); }, 120);
+    });
+  }
+
   // ---------- 事件绑定 ----------
   function bindEvents() {
     var lbClose = $("lb-close");
@@ -2026,6 +2115,8 @@
         toast("认领失败: " + e.message + netHint(e));
       });
     };
+
+    bindPortrait();
 
     // 下载相关（仅下载页存在这些按钮）
     var b1 = $("btn-zip");

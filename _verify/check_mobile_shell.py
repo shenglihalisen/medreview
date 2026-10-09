@@ -242,7 +242,29 @@ def main():
         print()
         print('=== C. 手机横屏布局 ===')
         check('侧栏手机下常驻变窄（html.is-phone #sidebar）', 'html.is-phone #sidebar' in css)
-        check('确认没残留抽屉方案（translateX(-100%)）', 'translateX(-100%)' not in css)
+        # 2026-10-10：抽屉只在**竖屏**用（docs/design/mobile-portrait.md 的
+        # 文件树抽屉）。横屏必须仍是常驻侧栏 —— 所以这里从「整份 CSS 里不许出现
+        # translateX(-100%)」收窄成「横屏段里不许出现」，否则竖屏抽屉一落地
+        # 这条断言就永远红着，起不到防回归的作用。
+        portrait_css = re.search(r'手机竖屏.*', css, re.S)
+        p_css = portrait_css.group(0) if portrait_css else ''
+        pre_portrait = css.split('手机竖屏')[0] if '手机竖屏' in css else css
+        check('横屏段没有抽屉方案（translateX(-100%) 只许出现在竖屏段）',
+              'translateX(-100%)' not in pre_portrait and 'translateX(-100%)' in p_css)
+        # ---------- 手机竖屏（docs/design/mobile-portrait.md，2026-10-10 落地）----------
+        check('竖屏不再硬锁横屏（提示条默认 hidden + 有「继续竖屏」按钮）',
+              'id="rotate-gate" hidden' in rv and 'id="rotate-gate" hidden' in dl and
+              'rotate-dismiss' in rv and 'rotate-dismiss' in dl)
+        check('竖屏没有「请横屏使用」硬遮罩措辞',
+              '请横屏使用' not in rv and '请横屏使用' not in dl)
+        check('文件树抽屉：☰ 按钮 + 遮罩 + 抽屉打开类',
+              'id="btn-drawer"' in rv and 'id="drawer-mask"' in rv and 'drawer-open' in css)
+        check('竖屏固定 1 列大图（#grid 强制单列）',
+              re.search(r'\.portrait\s+#grid\s*\{[^}]*grid-template-columns:\s*1fr', css) is not None)
+        check('竖屏底部操作条（sticky + 安全区）',
+              'p-bottombar' in css and 'env(safe-area-inset-bottom)' in css)
+        check('JS 里有竖屏交互：抽屉开关/ 左边缘右滑 / 底部条转调',
+              'function bindPortrait' in js and 'drawer-open' in js and 'touchstart' in js)
         check('手机固定 1 列（JS 里 S.cols = 1）', re.search(r'S\.cols\s*=\s*1\s*;', js) is not None)
         check('触控按钮高度变量 --acks-h 存在且手机下是 44px',
               '--acks-h: 30px' in css and re.search(r'html\.is-phone\s*\{\s*--acks-h:\s*44px', css) is not None)
