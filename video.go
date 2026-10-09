@@ -255,6 +255,16 @@ func findTool(name string) string {
 			return p
 		}
 	}
+	// 内置 ImageMagick：同样在首次运行时释放到 %LocalAppData%，但它连配置
+	// xml/icc 一起释放，且运行时要靠 MAGICK_HOME 定位配置（见 magick_embed.go）。
+	if name == "magick" {
+		if d := embeddedMagickDir(); d != "" {
+			p := filepath.Join(d, exe)
+			if st, err := os.Stat(p); err == nil && !st.IsDir() {
+				return p
+			}
+		}
+	}
 	if p, err := exec.LookPath(name); err == nil {
 		return p
 	}
