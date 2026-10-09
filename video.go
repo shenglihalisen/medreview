@@ -288,6 +288,16 @@ func (v *VideoService) encCached() string {
 	return v.encMode
 }
 
+// activeWorkers 返回「本服务当前跑几个转码并发」，用于算单个 ffmpeg 该分几个线程。
+// 与全局负载预算对齐：并发越多、单进程线程越少，总量铺满机器即可。
+func (v *VideoService) activeWorkers() int {
+	n := int(activeJobs.Load())
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
+
 // encoderArgs 按当前编码器给输出侧参数（含 -c:v）。
 // 硬件编码器那几条参数都是"画质档位"语义，不是软编的 crf 直译：
 //   - NVENC：rc=vbr_hq（-b 恒定码率会明显糊）+ cq 当质量档（同 crf）+ preset p4 折中速度/体积；
@@ -1085,6 +1095,10 @@ func (v *VideoService) WarmUp(ctx context.Context, conc int) {
 		wg2.Add(1)
 		go func() {
 			defer wg2.Done()
+			// 注册进全局负载预算：视频转码与图片预热共用一套并发额度，
+			// 否则两边各开 3 并发就是 6 个重负载进程在 8 核上互踩，前台全被拖慢。
+			enterJob()
+			defer leaveJob()
 			for it := range queue {
 				if ctx.Err() != nil {
 					return
@@ -1173,6 +1187,12 @@ func (v *VideoService) transcode(ctx context.Context, f *FileItem, pi probeInfo,
 	args := []string{
 		"-hide_banner", "-y",
 		"-i", src,
+		// 线程限流：ffmpeg 默认把**所有**核都吃满，3 个转码并发就是 3×N 个线程
+		// 在 8 核上互相抢，网页请求与图片预热全被拖慢。限成「核数/并发数」，
+		// 总线程数刚好铺满机器，既有并行度又不互相踩。
+		"-threads", strconv.Itoa(transcodeThreads(v.activeWorkers())),
+		// 解码侧同样限：解码吃 CPU 不比编码少，不限的话限制只做了一半。
+		"-filter_threads", strconv.Itoa(transcodeThreads(v.activeWorkers())),
 	}
 	if needScale {
 		args = append(args, "-vf", fmt.Sprintf("scale=%d:%d", tw, th))

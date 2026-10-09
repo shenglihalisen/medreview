@@ -529,7 +529,10 @@ func (a *app) startWarmup() {
 	seq := a.warmSeq
 	a.warmMu.Unlock()
 
-	conc := a.cfg.vjobs
+	// 并发数：默认按核数与「前台预留」自动算（warmWorkers），不再硬用 -vjobs 的
+	// 固定 3 —— 3 在 8 核上配合不限线程的 ffmpeg 会把机器打满，网页请求全被拖慢。
+	// 用户显式传了 -vjobs（>0）才尊重他的值。
+	conc := warmWorkers(a.cfg.vjobs)
 	a.warmMu.Lock()
 	if a.warmConc > 0 {
 		conc = a.warmConc
