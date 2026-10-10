@@ -398,11 +398,16 @@ kbd { background: #f0f2f5; border: 1px solid var(--border-strong); border-bottom
    z-index:500），竖屏进不去。设计见 docs/design/mobile-portrait.md：
    横屏仍是主推，但竖屏**允许使用**，只在顶部给一条可关闭的轻提示。
    —— 锁死竖屏等于把单手竖握的用户挡在门外，而下面的竖屏布局已经能用了。 */
+/* 竖屏提示条的实际高度用变量声明一次，JS 侧也从 CSS 读它 ——
+   之前 JS 硬编码 34px、#app 也硬编码 34px，而 CSS 实际约 38px（还没算
+   刘海安全区），三处各写各的必然对不上，表现为顶部工具栏被提示条压住一小截。
+   单一来源 = --gate-h。 */
 #rotate-gate { display: none; }
 html.is-phone #rotate-gate {
   position: fixed; top: 0; left: 0; right: 0; z-index: 480;
   display: flex; align-items: center; gap: 8px;
-  padding: calc(env(safe-area-inset-top, 0px) + 6px) 10px 6px;
+  height: var(--gate-h);
+  padding: 0 10px;
   background: rgba(40,40,46,.92); color: var(--text-dim);
   font-size: 12.5px; line-height: 1.4;
   border-bottom: 1px solid var(--line);
@@ -433,7 +438,14 @@ html.is-phone:not(.portrait) #rotate-gate { display: none; }
    判定由 <head> 里的内联脚本完成，与窗口宽度无关。
    桌面完全不受这一段影响。
    ============================================================ */
-html.is-phone { --acks-h: 44px; }
+html.is-phone {
+  --acks-h: 44px;
+  /* 竖屏顶部提示条高度：6(top)+22(图标)+6(bottom)+ 刘海安全区。
+     #app 的 padding-top 与 #toolbar 的 sticky top 都读它，别再各写各的。 */
+  --gate-h: calc(34px + env(safe-area-inset-top, 0px));
+  /* 竖屏底部操作条高度：8(top) + 44(按钮) + 8(bottom) + Home 指示条 */
+  --bar-h: calc(60px + env(safe-area-inset-bottom, 0px));
+}
 
 /* 侧栏常驻、变窄（不做抽屉、不做汉堡） */
 html.is-phone #sidebar { width: clamp(132px, 26vw, 200px); min-width: 132px; flex-shrink: 0; }
@@ -467,6 +479,13 @@ html.is-phone #dl-bar .btn { flex: 1 1 45%; min-height: 40px; }
 html.is-phone .card .acts button { font-size: 17px; }
 html.is-phone .card .bar { font-size: 12px; }
 html.is-phone #grid-wrap { padding: 8px; }
+/* 手机上「○ 不确定」原本被限宽到 26px（.mid 是三个标记按钮之一），
+   手指点不中。竖屏是单手操作、按钮要够大 —— 三个一律等宽。
+   （这一条放在手机段，横竖屏都受益：26px 低于 44px 触控标准，横屏同样难点。） */
+html.is-phone .card .acts .mid {
+  flex: 1 1 0;
+  min-width: 44px;
+}
 
 /* 灯箱：安全区避让 + 更窄的两侧留白 */
 html.is-phone .lb-body { padding: 0 84px; }
@@ -499,9 +518,11 @@ html.is-phone #name-ok { min-height: 44px; }
    本段全部带 `.portrait` 限定，横屏不会命中任何一条。
    ============================================================ */
 
-/* 竖屏：顶部让出软提示条的高度（提示条是 fixed，不占文档流） */
-html.is-phone.portrait #app { padding-top: 34px; }
-html.is-phone.portrait #rotate-gate[hidden] ~ #app,
+/* 竖屏：顶部让出提示条的高度。用 CSS 变量（由 #rotate-gate 那条规则声明
+   实际高度），不要在这里硬编码数字 —— 之前 JS 34px / #app 34px / CSS 实际
+   38px 三处不一致，顶部工具栏会被压掉一小截。 */
+html.is-phone.portrait #app { padding-top: var(--gate-h, 34px); }
+/* 提示条关掉后不留空隙 */
 html.is-phone.portrait.no-gate #app { padding-top: 0; }
 
 /* --- 4.2 文件树抽屉 --- */
@@ -523,8 +544,10 @@ html.is-phone.portrait:not(.drawer-open) .drawer-mask { display: none; }
 
 /* --- 4.1 顶部栏 --- */
 html.is-phone.portrait #toolbar {
-  position: sticky; top: 0; z-index: 430;
-  padding: calc(env(safe-area-inset-top, 0px) + 6px) 10px 6px;
+  /* top 必须等于提示条高度：提示条是 fixed（z-index 480）且工具栏是 sticky
+     （430），不这样顶上去，滚动时工具栏会从提示条下面穿过去、被盖住一半。 */
+  position: sticky; top: var(--gate-h, 34px); z-index: 430;
+  padding: 6px 10px;
   gap: 8px;
 }
 html.is-phone.portrait #btn-drawer { display: inline-block; }
@@ -555,25 +578,50 @@ html.is-phone.portrait .p-bottombar button {
 .p-bottombar { display: none; }
 html.is-phone.portrait .p-bottombar { display: flex; }
 
-/* --- 5 灯箱：两侧栏重排到底部（工具行 + 标记行） --- */
+/* --- 5 灯箱：两侧栏从左右两侧改为上下两条（标记行 + 工具行） ---
+   ⚠️ 真实 DOM 结构（review.html）：
+        #lightbox > .lb-top
+                   > .lb-body#lb-body
+                   > .lb-side.lb-left   （标记：保留/不确定/不保留）
+                   > .lb-side.lb-right  （缩放：放大/缩小）
+                   > .lb-pager          （‹ 计数 › + 看原图）
+   三个 .lb-* 是 **#lightbox 的兄弟节点**，不在 .lb-body 里。
+   所以横屏用 position:absolute 贴左右两侧；竖屏要把它们改成
+   「跟着 #lightbox 走常规流、堆在 .lb-body 下方」——
+   之前写的 .lb-sides 这个容器在 HTML 里根本不存在（死代码，已删除）。 */
 html.is-phone.portrait .lb-body { padding: 0 8px; }
-html.is-phone.portrait .lb-left,
-html.is-phone.portrait .lb-right {
-  position: static; left: auto; right: auto; top: auto;
+/* 解除横屏的绝对定位，回到常规流（否则还贴在左右两侧、压住图）。
+   ⚠️ 必须连transform 一起清：横屏的 .lb-side 带 translateY(-50%) 做垂直居中，
+   只改 position 的话按钮会整体上移一半（露在可视区外）。 */
+html.is-phone.portrait .lb-side {
+  position: static;
+  transform: none;
+  left: auto; right: auto; top: auto; bottom: auto;
+  display: flex; align-items: center; justify-content: center;
+  gap: 10px; flex-wrap: wrap;
+  padding: 8px 10px;
+  /* 工具行/标记行在竖屏是「贴着底」的两条，各自留出安全区 */
+  padding-bottom: calc(8px + env(safe-area-inset-bottom));
+  background: rgba(28,28,32,.96);
+  border-top: 1px solid var(--line);
 }
-/* 底部把标记面板与工具行横向排开：空间有限，能横排就横排，竖排时自动堆叠 */
-html.is-phone.portrait .lb-sides {
-  position: fixed; left: 0; right: 0; bottom: 0; z-index: 430;
-  display: flex; gap: 8px; align-items: center;
-  padding: 8px 10px calc(8px + env(safe-area-inset-bottom));
-  background: rgba(28,28,32,.96); border-top: 1px solid var(--line);
+/* 竖屏下 .lb-body 之上留出空间，别被上面两条盖住 */
+html.is-phone.portrait .lb-body { padding-bottom: 8px; }
+/* 缩放按钮在竖屏不占一整行：和标记按钮同一行更省空间 */
+html.is-phone.portrait .lb-right { padding-top: 0; }
+/* 翻页条排在最上面（DOM 里在最后，用 order 提前）。
+   同样要清 transform：横屏靠 translateX(-50%) 做水平居中。 */
+html.is-phone.portrait .lb-pager {
+  order: -1;
+  position: static;
+  transform: none;
+  left: auto; bottom: auto;
+  width: 100%;
+  justify-content: center;
+  padding: 8px 10px;
 }
-html.is-phone.portrait .lb-sides .lb-side { display: flex; gap: 8px; align-items: center; }
-html.is-phone.portrait .lb-sides .lb-right { margin-left: auto; }
-html.is-phone.portrait .lb-pager { bottom: calc(60px + env(safe-area-inset-bottom)); }
-/* 标记按钮在竖屏要够大（手指点得中） */
-html.is-phone.portrait .lb-sides .card .acts button,
-html.is-phone.portrait .lb-sides button { min-width: 44px; min-height: 44px; }
-/* clean view：点图隐 chrome 时把底部面板也一起藏掉 */
-html.is-phone.portrait.lb-clean .lb-sides,
-html.is-phone.portrait.lb-clean .p-bottombar { display: none; }
+/* 竖屏按钮要够大（手指点得中） */
+html.is-phone.portrait .lb-side button {
+  min-width: 48px; min-height: 44px;
+}
+html.is-phone.portrait .lb-side .kbd { display: none; }

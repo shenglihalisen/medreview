@@ -263,6 +263,38 @@ def main():
               re.search(r'\.portrait\s+#grid\s*\{[^}]*grid-template-columns:\s*1fr', css) is not None)
         check('竖屏底部操作条（sticky + 安全区）',
               'p-bottombar' in css and 'env(safe-area-inset-bottom)' in css)
+        # 审阅页与下载页的竖屏能力必须一致：底部操作条、抽屉按钮、遮罩、提示条
+        # 都两个页面都要有。只给一个页面加过，另一半就变成功能缺失（2026-10-10 发现）。
+        check('审阅页与下载页竖屏结构一致（底部条/抽屉按钮/遮罩/提示条）',
+              all('p-bottombar' in p for p in (rv, dl)) and
+              all('btn-drawer' in p for p in (rv, dl)) and
+              all('drawer-mask' in p for p in (rv, dl)) and
+              all('rotate-dismiss' in p for p in (rv, dl)))
+        # 灯箱竖屏重排要用真实存在的选择器：#lightbox 的子节点是
+        # .lb-side.lb-left / .lb-side.lb-right / .lb-pager（不是 .lb-sides ——
+        # 那个容器在 HTML 里不存在，用它写规则等于死代码，灯箱根本不会重排）。
+        # 只看**选择器**里的出现（注释里说明"已删除"不算），故先剥掉注释。
+        css_no_comment = re.sub(r'/\*.*?\*/', '', css, flags=re.S)
+        check('灯箱竖屏重排用真实选择器（无.lb-sides 死代码）',
+              'lb-sides' not in css_no_comment)
+        check('灯箱竖屏解除横屏绝对定位时连 transform 一起清',
+              re.search(r'\.portrait\s+\.lb-side\s*\{[^}]*transform:\s*none', css) is not None and
+              re.search(r'\.portrait\s+\.lb-pager\s*\{[^}]*transform:\s*none', css) is not None)
+        # 竖屏卡片高度要扣掉顶部提示条 + 底部操作条，否则底部标记按钮被压住点不到。
+        # 且这两个高度必须**从 CSS 变量读**（cssPx("--gate-h"/"--bar-h")）——
+        # 之前 JS 硬编码 34、CSS 实际 38，三处各写各的必然对不上。
+        check('竖屏卡片高度已扣掉固定条（measure 读 CSS 变量而非硬编码）',
+              'cssPx("--gate-h")' in js and 'cssPx("--bar-h")' in js and
+              '34 + 60' not in js)
+        check('CSS 声明了 --gate-h / --bar-h 两个高度变量',
+              '--gate-h:' in css and '--bar-h:' in css)
+        # 顶部工具栏是 sticky 而提示条是 fixed：top 不等于提示条高就会被盖住
+        check('竖屏工具栏 sticky top 落在提示条之下（用 var(--gate-h)）',
+              re.search(r'\.portrait\s+#toolbar\s*\{[^}]*position:\s*sticky[^}]*top:\s*var\(--gate-h', css) is not None)
+        # 「○ 不确定」是三个标记按钮之一，原本被 .mid 限宽到 26px —— 手指点不中。
+        # 设计文档 §2「大点击区」要求按钮够大，不能只把两个大按钮做好。
+        check('手机上三个标记按钮都够大（.mid 不再限宽 26px）',
+              re.search(r'html\.is-phone[^{]*\.card \.acts \.mid\s*\{[^}]*min-width:\s*44px', css) is not None)
         check('JS 里有竖屏交互：抽屉开关/ 左边缘右滑 / 底部条转调',
               'function bindPortrait' in js and 'drawer-open' in js and 'touchstart' in js)
         check('手机固定 1 列（JS 里 S.cols = 1）', re.search(r'S\.cols\s*=\s*1\s*;', js) is not None)
