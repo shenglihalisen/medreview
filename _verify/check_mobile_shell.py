@@ -291,6 +291,10 @@ def main():
         # 顶部工具栏是 sticky 而提示条是 fixed：top 不等于提示条高就会被盖住
         check('竖屏工具栏 sticky top 落在提示条之下（用 var(--gate-h)）',
               re.search(r'\.portrait\s+#toolbar\s*\{[^}]*position:\s*sticky[^}]*top:\s*var\(--gate-h', css) is not None)
+        # 2026-10-10 修复：登记遮罩 #name-gate 之前 z-index:400，低于竖屏工具栏的 430，
+        # 导致头部按钮穿透半透明遮罩叠到登记框上。入场模态必须最顶，提升到 500（>480/430）。
+        check('名字登记遮罩是最顶层（z-index 500 > 工具栏 430 / 提示条 480，头部按钮不穿透）',
+              re.search(r'#name-gate\s*\{[^}]*z-index:\s*500', css) is not None)
         # 「○ 不确定」是三个标记按钮之一，原本被 .mid 限宽到 26px —— 手指点不中。
         # 设计文档 §2「大点击区」要求按钮够大，不能只把两个大按钮做好。
         check('手机上三个标记按钮都够大（.mid 不再限宽 26px）',
