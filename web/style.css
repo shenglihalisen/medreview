@@ -553,6 +553,10 @@ html.is-phone.portrait #toolbar {
   padding: 6px 10px;
   gap: 8px;
 }
+/* 关掉提示条（.no-gate）后吸顶偏移必须归零：否则滚动时工具条仍停在离顶端
+   --gate-h 处，上方留一道空白，看着就是"没贴到最顶"。#app 的 padding-top
+   在 .no-gate 下已归零，这里把 sticky top 也归零，两者保持一致。 */
+html.is-phone.portrait.no-gate #toolbar { top: 0; }
 html.is-phone.portrait #btn-drawer { display: inline-block; }
 /* 汉堡按钮：桌面/横屏隐藏 */
 #btn-drawer { display: none; }
