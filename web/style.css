@@ -382,7 +382,10 @@ kbd { background: #f0f2f5; border: 1px solid var(--border-strong); border-bottom
 /* ---------- 名字门禁（网页内弹窗，替代原生 prompt） ---------- */
 #name-gate {
   position: fixed; inset: 0; background: rgba(20,22,26,.5); display: none;
-  z-index: 400; align-items: center; justify-content: center;
+  /* 2026-10-10 修复：登记遮罩必须是最顶层。竖屏 #toolbar 是 sticky(z-430)、
+     #rotate-gate 是 fixed(z-480)，若这里低于它们，头部按钮会穿透遮罩叠到登记框上。
+     入场模态应盖住一切，故取 500（高于 480/430）。 */
+  z-index: 500; align-items: center; justify-content: center;
 }
 #name-gate.on { display: flex; }
 .ng-box { background: #fff; border-radius: 10px; width: 420px; max-width: 92vw; padding: 22px 24px; box-shadow: 0 8px 30px rgba(0,0,0,.2); }
