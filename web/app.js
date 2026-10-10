@@ -777,16 +777,33 @@
   }
 
   // ---------- 网格窗口化渲染 ----------
+
+  // cssPx 读 CSS 变量的像素值。用来让 JS 里的几何计算跟着 CSS 走 ——
+  // 竖屏上下有固定条（提示条/操作条）会盖住内容，卡片高度必须减掉它们，
+  // 而这两个高度写在 CSS 里（--gate-h / --bar-h）。别在 JS 里再抄一份数字。
+  function cssPx(varName, fallback) {
+    var v = getComputedStyle(document.documentElement).getPropertyValue(varName);
+    var n = parseFloat(v);
+    return isNaN(n) ? (fallback || 0) : n;
+  }
+
   function measure() {
+    // 竖屏专用：上下都有固定条（顶部提示条、底部操作条），
+    // 它们是 position:fixed/sticky，不占文档流但**会盖住内容** ——
+    // 卡片高度必须减掉这两条，否则底部标记按钮正好被操作条压住点不到。
+    var portrait = IS_PHONE && document.documentElement.classList.contains("portrait");
     var pad = IS_PHONE ? 16 : 24;
     var w = el.wrap.clientWidth - pad;
     if (w <= 0) return;
     if (IS_PHONE) {
-      // 手机固定 1 列，且卡片占满可视高度：图片 + 文件名条 + 三个标记按钮
-      // 一屏全见，不用滚动才够得到按钮。
+      // 手机固定 1 列。横屏：卡片占满可视高度（一屏全见，不用滚动才够得到按钮）；
+      // 竖屏：额外扣掉顶部提示条与底部操作条，标记按钮才不会被压住。
+      //   高度从 CSS 变量 --gate-h / --bar-h 读，别在 JS 里再硬编码一遍
+      //   （之前 JS 34px、CSS 实际 38px，三处各写各的必然对不上）。
       S.cols = 1;
       S.colW = w;
-      S.cellH = Math.max(150, el.wrap.clientHeight - pad - S.gap);
+      var chrome = portrait ? (cssPx("--gate-h") + cssPx("--bar-h")) : 0;
+      S.cellH = Math.max(150, el.wrap.clientHeight - pad - S.gap - chrome);
       S.rowH = S.cellH + S.gap;
       return;
     }
