@@ -458,16 +458,139 @@ func TestShareTokenIssueAndConsume(t *testing.T) {
 	if !h.shareTokenValid(tok) {
 		t.Fatal("刚签发的分享 token 应有效")
 	}
-	// 额度耗尽后失效
-	for i := 0; i < shareTokenUses; i++ {
+	// 额度耗尽后失效（空 body 签发 → 默认经典"10 次"行为）
+	for i := 0; i < shareDefaultUses; i++ {
 		h.consumeShareQuota(&http.Request{URL: mustURL("/api/zip?s=" + tok)})
 	}
 	if h.shareTokenValid(tok) {
-		t.Fatalf("用满 %d 次后分享 token 仍有效 —— 限次没生效", shareTokenUses)
+		t.Fatalf("用满 %d 次后分享 token 仍有效 —— 限次没生效", shareDefaultUses)
 	}
 	// 未知 token 一律无效
 	if h.shareTokenValid("deadbeefdeadbeef") {
 		t.Fatal("不存在的分享 token 被判为有效")
+	}
+}
+
+// 分享 token 不能用来再签发新的分享 token（防套娃）。
+// 否则接收方拿一个分享链接就能无限给自己生小号，"1h/10 次"限制被架空。
+func TestShareTokenCannotMintNewShare(t *testing.T) {
+	a := testApp(t, "127.0.0.1:0")
+	h := a.h
+
+	// 主口令签发一个分享 token
+	tok := issueShareToken(t, h)
+
+	// 用这个分享 token（走 Cookie mr_dl_share）去调签发接口 → 必须 403
+	req := httptest.NewRequest("POST", "/api/dl-share", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: "mr_dl_share", Value: tok})
+	rec := httptest.NewRecorder()
+	h.Routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("用分享 token 套娃签发应 403，实际 %d %s", rec.Code, rec.Body.String())
+	}
+
+	// 用这个分享 token（走 ?s=）去调签发接口 → 同样必须 403
+	req2 := httptest.NewRequest("POST", "/api/dl-share?s="+tok, strings.NewReader(`{}`))
+	req2.Header.Set("Content-Type", "application/json")
+	rec2 := httptest.NewRecorder()
+	h.Routes().ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusForbidden {
+		t.Fatalf("用 ?s= 分享 token 套娃签发应 403，实际 %d %s", rec2.Code, rec2.Body.String())
+	}
+
+	// 确认原分享 token 仍然有效（403 没把它作废）
+	if !h.shareTokenValid(tok) {
+		t.Fatal("被拒的签发请求不应消耗/作废原有的分享 token")
+	}
+}
+
+// 分享 token 的失效方式可配置：按次 / 按小时 / 按天，且非法 mode 退化为默认。
+func TestShareTokenModes(t *testing.T) {
+	a := testApp(t, "127.0.0.1:0")
+	h := a.h
+
+	d1 := postShareToken(t, h, `{"mode":"use","value":3}`)
+	if int(d1["maxUses"].(float64)) != 3 {
+		t.Fatalf("按次模式 maxUses 应为 3，实际 %v", d1["maxUses"])
+	}
+
+	d2 := postShareToken(t, h, `{"mode":"hour","value":1}`)
+	if int(d2["maxUses"].(float64)) != 0 {
+		t.Fatalf("按小时模式 maxUses 应为 0（不限次），实际 %v", d2["maxUses"])
+	}
+
+	d3 := postShareToken(t, h, `{"mode":"day","value":2}`)
+	if int(d3["maxUses"].(float64)) != 0 {
+		t.Fatalf("按天模式 maxUses 应为 0（不限次），实际 %v", d3["maxUses"])
+	}
+
+	// 非法 mode / 缺省 → 退化默认 shareDefaultUses 次
+	d4 := postShareToken(t, h, `{"mode":"bogus","value":999}`)
+	if int(d4["maxUses"].(float64)) != shareDefaultUses {
+		t.Fatalf("非法 mode 应退化默认 %d 次，实际 %v", shareDefaultUses, d4["maxUses"])
+	}
+
+	// value 越界被夹到上限（按次上限 shareMaxUses）
+	d5 := postShareToken(t, h, `{"mode":"use","value":999999}`)
+	if int(d5["maxUses"].(float64)) != shareMaxUses {
+		t.Fatalf("按次 value 越界应夹到 %d，实际 %v", shareMaxUses, d5["maxUses"])
+	}
+}
+
+// 分享 token 的额度必须按 Cookie(mr_dl_share) 也能核销 —— 这是旧实现的死 bug：
+// 接收方把 ?s= 换成 Cookie 后，下载走 ?t=（主口令为空），consumeShareQuota 只认 ?s= 从不扣。
+// 现在用 Cookie 路径下载，次数应被正确扣减。
+func TestConsumeShareQuotaByCookie(t *testing.T) {
+	a := testApp(t, "127.0.0.1:0")
+	h := a.h
+	d := postShareToken(t, h, `{"mode":"use","value":2}`)
+	tok := d["token"].(string)
+
+	req := func() *http.Request {
+		r := httptest.NewRequest("GET", "/api/zip?folder=1", nil)
+		r.AddCookie(&http.Cookie{Name: "mr_dl_share", Value: tok})
+		return r
+	}
+	h.consumeShareQuota(req())
+	if h.shares[tok].used != 1 {
+		t.Fatalf("Cookie 路径下额度应扣 1，实际 %d", h.shares[tok].used)
+	}
+	h.consumeShareQuota(req())
+	if h.shares[tok].used != 2 {
+		t.Fatalf("Cookie 路径下额度应扣到 2，实际 %d", h.shares[tok].used)
+	}
+	if h.shareTokenValid(tok) {
+		t.Fatal("用满 2 次后分享 token 仍有效（Cookie 路径未核销）")
+	}
+}
+
+// 主口令可主动吊销已签发的分享链接。
+func TestShareTokenRevoke(t *testing.T) {
+	a := testApp(t, "127.0.0.1:0")
+	h := a.h
+	tok := issueShareToken(t, h)
+
+	rev := httptest.NewRequest("POST", "/api/dl-share-revoke", strings.NewReader(`{"token":"`+tok+`"}`))
+	rev.Header.Set("Content-Type", "application/json")
+	rev.AddCookie(&http.Cookie{Name: "mr_dl", Value: h.tokenOf()})
+	rec := httptest.NewRecorder()
+	h.Routes().ServeHTTP(rec, rev)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("吊销失败: %d %s", rec.Code, rec.Body.String())
+	}
+	if h.shareTokenValid(tok) {
+		t.Fatal("吊销后的分享 token 仍有效")
+	}
+
+	// 非主口令（分享 token 本身）不能吊销
+	rev2 := httptest.NewRequest("POST", "/api/dl-share-revoke", strings.NewReader(`{"token":"x"}`))
+	rev2.Header.Set("Content-Type", "application/json")
+	rev2.AddCookie(&http.Cookie{Name: "mr_dl_share", Value: tok})
+	rec2 := httptest.NewRecorder()
+	h.Routes().ServeHTTP(rec2, rev2)
+	if rec2.Code != http.StatusForbidden {
+		t.Fatalf("用分享 token 吊销应 403，实际 %d", rec2.Code)
 	}
 }
 
@@ -802,6 +925,25 @@ func issueShareToken(t *testing.T, h *Handler) string {
 		t.Fatal(err)
 	}
 	return d.Token
+}
+
+// postShareToken 以主口令身份签发一个分享 token，body 为 JSON（可指定 mode/value）。
+// 返回解码后的响应 map（含 token / maxUses / mode / value / expiresAt 等）。
+func postShareToken(t *testing.T, h *Handler, body string) map[string]any {
+	t.Helper()
+	req := httptest.NewRequest("POST", "/api/dl-share", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: "mr_dl", Value: h.tokenOf()})
+	rec := httptest.NewRecorder()
+	h.Routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("签发分享 token 失败(%s): %d %s", body, rec.Code, rec.Body.String())
+	}
+	var d map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil {
+		t.Fatal(err)
+	}
+	return d
 }
 
 // someImageID 找一个图片 id；没有图片返回 0（让调用方 skip）。

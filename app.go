@@ -146,6 +146,7 @@ func newApp(cfg appConfig, logs *logRing, logPath string) (*app, error) {
 		// 「有没有本地窗口」：gui / wails 版都有，console 版只有黑窗口
 		gui: buildMode != "console",
 	}
+	a.h.startShareGC()
 	// 仪表盘增量推送：先建再接回调，最后启动循环。
 	// 顺序有讲究 —— 回调必须在 Start 之前接好，否则启动那一瞬的转码/QC
 	// 进展会找不到人标脏，页面要等下一次别的事件才更新。
@@ -240,6 +241,7 @@ func (a *app) Close() {
 	// 看着像故障，其实是退出时正常收尾。
 	if a.h != nil {
 		a.h.dash.Stop()
+		a.h.stopShareGC()
 	}
 	if a.db != nil {
 		// 先落 CSV 再关库：库一关就查不动 review 了，而这份 CSV 是标记唯一的去处。

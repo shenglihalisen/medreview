@@ -60,16 +60,19 @@ type Handler struct {
 	dlFailures map[string]*dlFailRecord
 
 	// 一次性分享 token（见 handleShareToken）。同样是纯内存、有过期、有次数上限。
-	shareMu sync.Mutex
-	shares  map[string]*shareToken
+	shareMu     sync.Mutex
+	shares      map[string]*shareToken
+	shareGCStop chan struct{} // 后台 GC 的停止信号；nil 表示未启动
 }
 
 // shareToken 是一次性下载授权：换取一个只能用 N 次、T 秒后失效的短 token，
 // 用来替代"把主口令塞进 URL"这种做法（口令会进历史、Referer、日志、截图）。
 type shareToken struct {
 	token     string
+	mode      string // shareModeUse / Hour / Day，仅用于展示
+	value     int    // 用户选的数值（次 / 小时 / 天）
 	expiresAt time.Time
-	maxUses   int
+	maxUses   int // 0 = 不限次（按时间 / 天模式）
 	used      int
 }
 
@@ -272,6 +275,7 @@ func (h *Handler) Routes() http.Handler {
 	// 一次性分享链接：签发（需已登录）与自助换 Cookie。
 	mux.HandleFunc("POST /api/dl-share", h.handleShareToken)
 	mux.HandleFunc("GET /api/dl-share-adopt", h.handleShareAdopt)
+	mux.HandleFunc("POST /api/dl-share-revoke", h.handleShareRevoke)
 	// 健康检查：给脚本化监控用（DB 可读 / 素材根在 / 转码目录可写）。
 	mux.HandleFunc("GET /api/healthz", h.handleHealthz)
 	mux.HandleFunc("GET /api/export", h.handleExportList)
@@ -457,10 +461,32 @@ func (h *Handler) canDownload(r *http.Request) bool {
 	}
 	// 分享 token 的两种带法：URL 上的 ?s=（刚点开链接时），或换成 Cookie 之后的
 	// mr_dl_share（页面 JS 收到 ok:true 后种下的）。后者让 URL 里不再带凭据。
-	if sc, err := r.Cookie("mr_dl_share"); err == nil && h.shareTokenValid(sc.Value) {
+	if h.shareTokenValidAny(r) {
 		return true
 	}
-	return h.shareTokenValid(r.URL.Query().Get("s"))
+	return false
+}
+
+// masterAuthorized 只认主口令：HttpOnly Cookie mr_dl，或显式 ?t=（仅当开了
+// -allow-query-token）。它**不**认分享 token（mr_dl_share / ?s=），因为签发新的
+// 分享 token 是高权限操作，绝不能让一个分享链接的接收方拿它再去给自己生小号
+// （否则"1 小时 / 10 次"的限制会被无限套娃架空，见 handleShareToken）。
+func (h *Handler) masterAuthorized(r *http.Request) bool {
+	if h.noToken {
+		return true
+	}
+	tok := h.tokenOf()
+	if c, err := r.Cookie("mr_dl"); err == nil && len(c.Value) == len(tok) &&
+		subtle.ConstantTimeCompare([]byte(c.Value), []byte(tok)) == 1 {
+		return true
+	}
+	if h.allowQueryToken {
+		if t := r.URL.Query().Get("t"); t != "" && len(t) == len(tok) &&
+			subtle.ConstantTimeCompare([]byte(t), []byte(tok)) == 1 {
+			return true
+		}
+	}
+	return false
 }
 
 // shareTokenValid 只校验分享 token，不消耗额度。
@@ -475,19 +501,72 @@ func (h *Handler) shareTokenValid(tok string) bool {
 	if !ok {
 		return false
 	}
-	if now.After(rec.expiresAt) || rec.used >= rec.maxUses {
+	if now.After(rec.expiresAt) || (rec.maxUses > 0 && rec.used >= rec.maxUses) {
 		delete(h.shares, tok)
 		return false
 	}
 	return true
 }
 
+// shareTokenValidAny 在**单次持锁**内检查 Cookie 或 URL 任一带的分享 token 是否有效，
+// 避免 canDownload 对分享 token 加两次锁。任一有效即返回 true。
+func (h *Handler) shareTokenValidAny(r *http.Request) bool {
+	now := time.Now()
+	h.shareMu.Lock()
+	defer h.shareMu.Unlock()
+	var cands []string
+	if c, err := r.Cookie("mr_dl_share"); err == nil && c.Value != "" {
+		cands = append(cands, c.Value)
+	}
+	if s := r.URL.Query().Get("s"); s != "" {
+		cands = append(cands, s)
+	}
+	for _, tok := range cands {
+		rec, ok := h.shares[tok]
+		if !ok {
+			continue
+		}
+		if now.After(rec.expiresAt) || (rec.maxUses > 0 && rec.used >= rec.maxUses) {
+			delete(h.shares, tok)
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// shareRemaining 返回 token 剩余的存活秒数（已失效或不存在返回 0）。
+// 用于把 adopt 的 Cookie 有效期对齐到 token 本身，避免 Cookie 比 token 活得更久。
+func (h *Handler) shareRemaining(tok string) int {
+	h.shareMu.Lock()
+	defer h.shareMu.Unlock()
+	rec, ok := h.shares[tok]
+	if !ok {
+		return 0
+	}
+	left := time.Until(rec.expiresAt)
+	if left <= 0 {
+		return 0
+	}
+	return int(left.Seconds())
+}
+
 // ---------- 一次性分享 token ----------
 
 const (
-	shareTokenTTL   = time.Hour
-	shareTokenUses  = 10
 	shareTokenBytes = 12 // 96 bit 熵，和主口令同规格
+
+	// 分享链接的失效方式（见 handleShareToken）：三选一
+	shareModeUse  = "use"  // 按次：累计下载 N 次后失效
+	shareModeHour = "hour" // 按小时：N 小时后失效
+	shareModeDay  = "day"  // 按天：N 天后失效
+
+	// 各模式的默认值与上限（防滥用 / 防止链接永不过期）
+	shareDefaultUses   = 10     // 不指定 mode 时退化为经典"10 次"行为（向后兼容）
+	shareMaxUses       = 1000   // 按次上限
+	shareMaxHour       = 24 * 30 // 按小时上限（30 天）
+	shareMaxDay        = 30     // 按天上限
+	shareUseMaxLifetime = 30 * 24 * time.Hour // 按次模式的最长存活：一次都不用也会到点失效
 )
 
 // handleShareAdopt 让分享链接的接收方把一次性 token 换成 HttpOnly Cookie。
@@ -507,7 +586,7 @@ func (h *Handler) handleShareAdopt(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		MaxAge:   int(shareTokenTTL / time.Second),
+		MaxAge:   h.shareRemaining(tok),
 	})
 	writeJSON(w, map[string]any{"ok": true})
 }
@@ -532,43 +611,123 @@ func (h *Handler) handleHealthz(w http.ResponseWriter, r *http.Request) {
 
 // handleShareToken 签发一次性下载 token。
 //
-// 必须已通过 canDownload（也就是得先有 Cookie 或 -open-dl），否则就成了
-// "任何人都能给自己签发下载凭据"。返回的 token 只在 URL 里短暂有效，
-// 用满次数或过期即失效，且不能用来再签发新的。
+// 必须已通过主口令鉴权（masterAuthorized：mr_dl Cookie 或 -allow-query-token 的 ?t=，
+// 或 -open-dl 免校验），否则就成了"任何人都能给自己签发下载凭据"。特别地，
+// 拿一个分享 token（mr_dl_share / ?s=）来调这里会被拒 —— 分享链接的接收方
+// 不能拿它再去给自己生小号，否则失效限制会被无限套娃架空。
+//
+// 失效方式三选一（请求体 {mode, value}，缺省退化为经典"10 次"）：
+//   - use：按次，累计下载 value 次后失效（最长存活 shareUseMaxLifetime，防永久挂机）
+//   - hour：按小时，value 小时后失效（不限次）
+//   - day：按天，value 天后失效（不限次）
 func (h *Handler) handleShareToken(w http.ResponseWriter, r *http.Request) {
-	if !h.canDownload(r) {
-		http.Error(w, "请先登录下载页", http.StatusForbidden)
+	// 只认主口令：分享 token 本身不能再来签发新 token（防套娃）。
+	if !h.masterAuthorized(r) {
+		http.Error(w, "请先以主口令登录后再生成分享链接", http.StatusForbidden)
 		return
 	}
+	// 同源校验：签发凭据属于敏感操作，挡掉跨站 POST 诱导。
+	if origin := r.Header.Get("Origin"); origin != "" && !localOrigin(origin) {
+		http.Error(w, "跨站请求不被允许", http.StatusForbidden)
+		return
+	}
+
+	// 解析失效方式；缺省/非法 → 经典"10 次"行为（向后兼容空 body 的老调用）。
+	mode := shareModeUse
+	value := shareDefaultUses
+	var body struct {
+		Mode  string `json:"mode"`
+		Value int    `json:"value"`
+	}
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
+			switch body.Mode {
+			case shareModeUse, shareModeHour, shareModeDay:
+				mode = body.Mode
+				value = body.Value
+			}
+		}
+	}
+	var exp time.Time
+	var maxUses int
+	switch mode {
+	case shareModeUse:
+		if value < 1 {
+			value = 1
+		} else if value > shareMaxUses {
+			value = shareMaxUses
+		}
+		exp = time.Now().Add(shareUseMaxLifetime)
+		maxUses = value
+	case shareModeHour:
+		if value < 1 {
+			value = 1
+		} else if value > shareMaxHour {
+			value = shareMaxHour
+		}
+		exp = time.Now().Add(time.Duration(value) * time.Hour)
+		maxUses = 0
+	case shareModeDay:
+		if value < 1 {
+			value = 1
+		} else if value > shareMaxDay {
+			value = shareMaxDay
+		}
+		exp = time.Now().Add(time.Duration(value) * 24 * time.Hour)
+		maxUses = 0
+	}
+
 	buf := make([]byte, shareTokenBytes)
 	if _, err := rand.Read(buf); err != nil {
 		http.Error(w, "无法生成随机 token", http.StatusInternalServerError)
 		return
 	}
 	t := hex.EncodeToString(buf)
-	exp := time.Now().Add(shareTokenTTL)
 	h.shareMu.Lock()
 	if h.shares == nil {
 		h.shares = map[string]*shareToken{}
 	}
 	h.gcSharesLocked(time.Now())
-	h.shares[t] = &shareToken{token: t, expiresAt: exp, maxUses: shareTokenUses}
+	h.shares[t] = &shareToken{token: t, mode: mode, value: value, expiresAt: exp, maxUses: maxUses}
 	h.shareMu.Unlock()
-	rel := shareTokenTTL / time.Hour
 	writeJSON(w, map[string]any{
-		"token": t, "expiresAt": exp.Unix(), "maxUses": shareTokenUses,
-		"url": "/download.html?s=" + t,
-		"note": fmt.Sprintf("此链接最多可用 %d 次、%d 小时后失效；不要转发给无关的人", shareTokenUses, rel),
+		"token":     t,
+		"mode":      mode,
+		"value":     value,
+		"expiresAt": exp.Unix(),
+		"maxUses":   maxUses, // 0 = 不限次（按时间 / 天模式）
+		"url":       "/download.html?s=" + t,
+		"note":      shareDesc(mode, value),
 	})
+}
+
+// shareDesc 把失效方式翻译成一句人话，给前端弹窗直接展示。
+func shareDesc(mode string, value int) string {
+	switch mode {
+	case shareModeUse:
+		return fmt.Sprintf("此链接累计下载 %d 次后失效", value)
+	case shareModeHour:
+		return fmt.Sprintf("此链接 %d 小时后失效", value)
+	case shareModeDay:
+		return fmt.Sprintf("此链接 %d 天后失效", value)
+	}
+	return ""
 }
 
 // consumeShareQuota 核销一次分享额度。**只在真正把数据交出去的出口调用**
 // （/api/zip、/api/export、/api/copy）—— 见 canDownload 顶部关于"校验 vs 核销"的说明。
 //
-// 调用方必须已经过了 canDownload；这里只处理 share token 这一条通路
-// （走 Cookie 或主口令的请求本来就不限次，不该被这里误伤）。
+// 取本次请求实际用于鉴权的分享 token：优先 Cookie mr_dl_share，其次 ?s=。
+// 两个都不带说明是主口令/免校验请求，本来就不限次，直接返回。
+// 关键：校验 + 核销在**同一次持锁**内完成，避免并发下次数被超额（TOCTOU）；
+// 同时修了旧实现只认 ?s= 不认 Cookie 的 bug —— 接收方换 Cookie 后下载，额度以前一直没扣。
 func (h *Handler) consumeShareQuota(r *http.Request) {
-	tok := r.URL.Query().Get("s")
+	var tok string
+	if c, err := r.Cookie("mr_dl_share"); err == nil && c.Value != "" {
+		tok = c.Value
+	} else if s := r.URL.Query().Get("s"); s != "" {
+		tok = s
+	}
 	if tok == "" {
 		return
 	}
@@ -583,7 +742,7 @@ func (h *Handler) consumeShareQuota(r *http.Request) {
 		delete(h.shares, tok)
 		return
 	}
-	if rec.used >= rec.maxUses {
+	if rec.maxUses > 0 && rec.used >= rec.maxUses {
 		delete(h.shares, tok) // 次数用尽即作废，不给"下次再来"留机会
 		return
 	}
@@ -596,6 +755,67 @@ func (h *Handler) gcSharesLocked(now time.Time) {
 		if now.After(v.expiresAt) {
 			delete(h.shares, k)
 		}
+	}
+}
+
+// handleShareRevoke 让主口令持有者主动吊销一个已签发的分享链接（发错人了可立刻作废）。
+// 同样要求主口令鉴权 + 同源校验，且只能吊销、不能列出（不泄露其它链接）。
+func (h *Handler) handleShareRevoke(w http.ResponseWriter, r *http.Request) {
+	if !h.masterAuthorized(r) {
+		http.Error(w, "请先以主口令登录后再吊销分享链接", http.StatusForbidden)
+		return
+	}
+	if origin := r.Header.Get("Origin"); origin != "" && !localOrigin(origin) {
+		http.Error(w, "跨站请求不被允许", http.StatusForbidden)
+		return
+	}
+	var req struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Token == "" {
+		http.Error(w, "缺少 token", http.StatusBadRequest)
+		return
+	}
+	h.shareMu.Lock()
+	_, ok := h.shares[req.Token]
+	delete(h.shares, req.Token)
+	h.shareMu.Unlock()
+	writeJSON(w, map[string]any{"ok": ok})
+}
+
+// ---------- 分享 token 后台 GC ----------
+
+const shareGCInterval = 5 * time.Minute
+
+// startShareGC 启动一个周期清理过期分享 token 的后台 goroutine。
+// 仅当没有新 token 被签发时，过期条目也会被它清掉，避免长期运行的服务里
+// 那些"签了但再没被出示过"的 stale 条目无限堆积。
+func (h *Handler) startShareGC() {
+	stop := make(chan struct{})
+	h.shareGCStop = stop
+	go func() {
+		t := time.NewTicker(shareGCInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				now := time.Now()
+				h.shareMu.Lock()
+				h.gcSharesLocked(now)
+				h.shareMu.Unlock()
+			}
+		}
+	}()
+}
+
+// stopShareGC 停掉后台 GC。newApp 启动时调用 startShareGC，app.Close() 里对应停掉它，
+// 避免测试 / 退出时留下常驻 ticker goroutine（否则每建一个测试实例就泄漏一个）。
+func (h *Handler) stopShareGC() {
+	if h.shareGCStop != nil {
+		close(h.shareGCStop)
+		h.shareGCStop = nil
 	}
 }
 
@@ -748,6 +968,7 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"scan":        h.scanner.Progress(),
 		"totals":      t,
 		"canDownload": h.canDownload(r),
+		"isMaster":    h.masterAuthorized(r),
 		"gui":         h.gui,
 	})
 }
