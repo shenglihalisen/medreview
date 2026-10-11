@@ -371,6 +371,19 @@ html.is-phone .lb-guides-panel { right: 8px; top: 50px; min-width: 124px; }
 .browse-list li:hover { background: var(--primary-soft); }
 .browse-list li .p { color: var(--text-faint); font-size: 12px; }
 .hint { color: var(--text-dim); font-size: 12px; line-height: 1.7; }
+.hint .sub { color: var(--text-faint); margin-top: 6px; }
+/* 分享链接弹窗里的「输入框 + 复制按钮」一行排布 */
+.share-link-row { display: flex; gap: 8px; margin-top: 10px; }
+.share-link-row input {
+  flex: 1; min-width: 0; padding: 7px 10px; font-size: 13px;
+  border: 1px solid var(--border-strong); border-radius: 6px; background: #fafbfc; color: var(--text);
+}
+/* 生成前选失效方式：下拉 + 数字 + 单位 一行 */
+.share-cfg { display: flex; align-items: center; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+.share-cfg select { max-width: 260px; }
+.share-num { width: 80px; padding: 7px 10px; font-size: 13px;
+  border: 1px solid var(--border-strong); border-radius: 6px; background: #fafbfc; color: var(--text); }
+.share-unit { color: var(--text-dim); font-size: 13px; }
 kbd { background: #f0f2f5; border: 1px solid var(--border-strong); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; font: 12px/1.6 Consolas, monospace; }
 .toast {
   position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%);

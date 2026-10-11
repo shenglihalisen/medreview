@@ -276,7 +276,7 @@
       modal: $("modal"), modalBody: $("modal-body"), modalTitle: $("modal-title"),
       nameGate: $("name-gate"), nameInput: $("name-input"), nameHist: $("name-hist"), nameOk: $("name-ok"),
       toast: $("toast"), stat: $("stat"), claimBtn: $("claim-btn"), finishBtn: $("btn-finish"),
-      empty: $("empty"), dlBar: $("dl-bar"),
+      empty: $("empty"), dlBar: $("dl-bar"), shareBtn: $("btn-share"),
     };
 
     var q = new URLSearchParams(location.search);
@@ -2156,8 +2156,112 @@
     };
     var b5 = $("btn-copy");
     if (b5) b5.onclick = function () { openCopyModal(); };
+    var bShare = $("btn-share");
+    if (bShare) bShare.onclick = onShare;
 
     bindResync();
+  }
+
+  // 一键生成分享链接：选好失效方式（按次 / 按小时 / 按天）后签发一个一次性 token，
+  // 把完整链接交给同事即可下载，无需给主口令。只有主口令持有者（S.isMaster）能看到按钮。
+  var shareDefaults = { use: 10, hour: 1, day: 1 };
+  var shareMax = { use: 1000, hour: 720, day: 30 };
+  var shareUnits = { use: "次", hour: "小时", day: "天" };
+  var shareLabels = {
+    use: "按次：累计下载 N 次后失效",
+    hour: "按小时：N 小时后失效",
+    day: "按天：N 天后失效"
+  };
+
+  function onShare() {
+    if (!S.isMaster) { toast("需要以主口令登录后才能生成分享链接"); return; }
+    el.modalTitle.textContent = "生成分享链接";
+    el.modalBody.innerHTML = "";
+
+    var hint = document.createElement("div");
+    hint.className = "hint";
+    hint.innerHTML = "选择这个分享链接的失效方式，然后点「生成」。对方点开即可下载素材中标记为「保留」的文件。";
+    el.modalBody.appendChild(hint);
+
+    var row = document.createElement("div");
+    row.className = "share-cfg";
+    el.modalBody.appendChild(row);
+
+    var sel = document.createElement("select");
+    sel.className = "btn";
+    [["use", shareLabels.use], ["hour", shareLabels.hour], ["day", shareLabels.day]].forEach(function (p) {
+      var o = document.createElement("option"); o.value = p[0]; o.textContent = p[1]; sel.appendChild(o);
+    });
+    var num = document.createElement("input");
+    num.type = "number"; num.min = "1"; num.max = String(shareMax.use); num.className = "share-num"; num.value = shareDefaults.use;
+    var unit = document.createElement("span");
+    unit.className = "share-unit"; unit.textContent = " " + shareUnits.use;
+    sel.onchange = function () {
+      num.value = shareDefaults[sel.value];
+      num.max = String(shareMax[sel.value]);
+      unit.textContent = " " + shareUnits[sel.value];
+    };
+    row.appendChild(sel); row.appendChild(num); row.appendChild(unit);
+
+    var foot = document.createElement("div");
+    foot.className = "modal-foot";
+    var cancel = document.createElement("button");
+    cancel.className = "btn"; cancel.textContent = "取消"; cancel.onclick = closeModal;
+    var gen = document.createElement("button");
+    gen.className = "btn primary"; gen.textContent = "生成链接";
+    gen.onclick = function () {
+      var mode = sel.value;
+      var value = parseInt(num.value, 10);
+      if (!value || value < 1) value = 1;
+      api("/api/dl-share", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: mode, value: value })
+      }).then(function (d) {
+        showShareResult(d);
+      }).catch(function (e) {
+        var m = (e && e.message) || "";
+        if (/403|Forbidden/i.test(m)) toast("需要以主口令登录后才能生成分享链接");
+        else toast("生成分享链接失败: " + m);
+      });
+    };
+    foot.appendChild(cancel); foot.appendChild(gen);
+    el.modalBody.appendChild(foot);
+    el.modal.classList.add("on");
+  }
+
+  // 生成成功：展示完整链接 + 一键复制 + 失效说明。
+  function showShareResult(d) {
+    var full = location.origin + d.url; // d.url = /download.html?s=xxx
+    el.modalTitle.textContent = "分享链接已生成";
+    el.modalBody.innerHTML =
+      '<div class="hint">' +
+      "<p>把这个链接发给同事，对方点开即可下载素材中标记为「保留」的文件。</p>" +
+      '<p class="sub">' + (d.note || "链接用满即废，无需撤回。") + "</p>" +
+      '<div id="share-link-row" class="share-link-row"></div>' +
+      "</div>";
+    var row = $("share-link-row");
+    var inp = document.createElement("input");
+    inp.type = "text"; inp.readOnly = true; inp.value = full;
+    var copyBtn = document.createElement("button");
+    copyBtn.className = "btn primary"; copyBtn.textContent = "复制";
+    copyBtn.onclick = function () {
+      inp.select();
+      var done = function () { toast("已复制链接"); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(full).then(done, function () {
+          try { document.execCommand("copy"); done(); }
+          catch (e) { toast("复制失败，请手动复制"); }
+        });
+      } else {
+        try { document.execCommand("copy"); done(); }
+        catch (e) { toast("复制失败，请手动复制"); }
+      }
+    };
+    row.appendChild(inp);
+    row.appendChild(copyBtn);
+    el.modal.classList.add("on");
+    inp.focus(); inp.select();
   }
 
   // 由服务端直接复制文件到本机目录：不经过浏览器、不打包，大批量素材最快的路径
@@ -2518,9 +2622,12 @@
   function loadStatus() {
     return api("/api/status").then(function (st) {
       S.canDownload = !!st.canDownload;
+      S.isMaster = !!st.isMaster;
       S.folderRel = st.root || "";
       if (st.root) el.crumb.textContent = st.root.split(/[\\/]/).pop() || st.root;
       el.crumb.title = st.root || "未设置";
+      // 「生成分享链接」只有主口令持有者（不是分享链接接收方）才看得到
+      if (el.shareBtn) el.shareBtn.hidden = !S.isMaster;
       updateScan(st.scan);
       return st;
     }).catch(function (e) { toast("无法连接服务: " + e.message + netHint(e)); });
