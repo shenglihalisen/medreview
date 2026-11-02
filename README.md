@@ -92,6 +92,21 @@ go build -tags gui -ldflags "-H=windowsgui" -o medreview_ui.exe .
 - **硬件加速**：QC 解码的 `auto` 候选为 `cuda → qsv → vaapi`；`-qcdec` 也接受 `vaapi`（设备节点默认自动找 `/dev/dri/renderD128…131`，可用 `MEDREVIEW_VAAPI_DEVICE` 覆盖）。编码仍为 `nvenc` / `qsv` / CPU 三档，VAAPI 编码尚未接入。
 - **打开浏览器**：有桌面环境时用 `xdg-open`；无桌面（服务器）时忽略即可，地址会打印在日志里。
 
+### 2.4 macOS（headless）
+
+Go 原生支持 darwin，仓库可直接交叉编译（Apple Silicon / Intel 均可）：
+
+```bash
+./build-macos.sh              # 当前机器架构
+./build-macos.sh arm64        # 或 amd64
+./build-macos.sh universal    # lipo 合并成通用二进制（需在 macOS 上执行）
+```
+
+- **依赖**：`ffmpeg` / `ffprobe` 放到程序同目录的 `tools/ffmpeg/`，或 `brew install ffmpeg`；RAW / HEIC 需 `brew install imagemagick`（提供 `magick`）。
+- **未签名**：首次启动会被 Gatekeeper 拦下，在「系统设置 → 隐私与安全性」里允许，或执行 `xattr -d com.apple.quarantine ./medreview`。
+- **硬件加速**：macOS 暂未接入（VideoToolbox 未支持），一律 CPU。
+- **无桌面窗口**：headless 形态，启动后从日志里取访问地址。
+
 ## 3. 架构与源码结构
 
 单进程 Go 服务 + 原生前端，无外部服务依赖（数据库为嵌入式 SQLite，通过纯 Go 驱动 `modernc.org/sqlite`）。
@@ -120,6 +135,7 @@ ui/                  WebView2 本地控制台窗口界面（go:embed 进二进�
 tools/               build_single.py（单文件化）、make_lnk.py（生成快捷方式）；tools/ffmpeg/ 为内嵌源（不入库）
 _verify/             验收脚本（见第 8 节）
 build-linux.sh       Linux 构建脚本（默认单文件版；--slim 精简版）
+build-macos.sh       macOS 构建脚本（arm64 / amd64 / universal）
 tools/ffmpeg-linux/  Linux 版 ffmpeg/ffprobe（内嵌源，不入库）
 tools/imagemagick-linux/  Linux 版静态 magick（内嵌源，不入库）
 packaging/linux/     systemd 服务模板
@@ -250,7 +266,8 @@ check_token_random.py      下载口令随机性、启动器不写死口令
 ## 10. 已知限制
 
 - 官方分发目标为 Windows（ffmpeg 内嵌与快捷方式生成依赖 Windows）。
-- Linux 为自建 headless 形态（见 2.3）：无内嵌 ffmpeg、无桌面窗口，需自行提供 `tools/ffmpeg/`。
+- Linux 为自建 headless 形态（见 2.3）：单文件版内嵌工具，精简版需自行提供 `tools/ffmpeg/`。
+- macOS 同为自建 headless（见 2.4）：无内嵌工具、无桌面窗口、无硬件加速。
 - WebView2 版在部分环境会出现渲染进程崩溃循环；不稳定时请使用控制台版。
 - 转码缓存关闭程序时清空，下次启动需重新转码（`--vkeep` 可保留）。
 - 单实例使用同一端口；端口被占用时启动失败并给出提示。
@@ -383,6 +400,21 @@ The repository builds a GUI-less Linux binary in two flavours:
 - **Hardware acceleration**: QC decoding tries `cuda → qsv → vaapi` in `auto` mode; `-qcdec` also accepts `vaapi` (the device node is auto-detected at `/dev/dri/renderD128…131`, override with `MEDREVIEW_VAAPI_DEVICE`). Encoding still offers `nvenc` / `qsv` / CPU only; VAAPI encoding is not wired up yet.
 - **Browser**: `xdg-open` is used when a desktop session exists; on headless servers the address is printed to the log instead.
 
+### 2.4 macOS (headless)
+
+Go supports darwin natively; the repository cross-compiles for both Apple Silicon and Intel:
+
+```bash
+./build-macos.sh              # host architecture
+./build-macos.sh arm64        # or amd64
+./build-macos.sh universal    # lipo both into one universal binary (run on macOS)
+```
+
+- **Dependencies**: put `ffmpeg` / `ffprobe` under `tools/ffmpeg/` next to the binary, or `brew install ffmpeg`; RAW / HEIC needs `brew install imagemagick` (provides `magick`).
+- **Unsigned**: the first launch is blocked by Gatekeeper. Allow it in System Settings > Privacy & Security, or run `xattr -d com.apple.quarantine ./medreview`.
+- **Hardware acceleration**: not wired up for macOS (VideoToolbox unsupported); CPU only.
+- **No desktop window**: headless; read the address from the log.
+
 ## 3. Architecture and source layout
 
 A single-process Go service with a native frontend, no external services (SQLite embedded via the pure-Go driver `modernc.org/sqlite`).
@@ -411,6 +443,7 @@ ui/                  WebView2 desktop console UI (go:embed into the binary)
 tools/               build_single.py (single-file build), make_lnk.py (shortcut creation); tools/ffmpeg/ is the embed source (not tracked)
 _verify/             Acceptance scripts (see section 8)
 build-linux.sh       Linux build script (single-file by default; --slim for a small build)
+build-macos.sh       macOS build script (arm64 / amd64 / universal)
 tools/ffmpeg-linux/  Linux ffmpeg/ffprobe (embed source, not tracked)
 tools/imagemagick-linux/  Linux static magick (embed source, not tracked)
 packaging/linux/     systemd unit template
@@ -541,7 +574,8 @@ There is also `go test -run 'TestSetRoot|TestSetToken|TestRebind'`, covering run
 ## 10. Known limitations
 
 - Windows is the official distribution target (embedded ffmpeg and shortcut creation are Windows-specific).
-- Linux is supported as a self-built headless binary (see 2.3): no embedded ffmpeg and no desktop window; provide `tools/ffmpeg/` yourself.
+- Linux is supported as a self-built headless binary (see 2.3): the single-file build embeds the tools, the slim build needs `tools/ffmpeg/` alongside.
+- macOS is also a self-built headless target (see 2.4): no embedded tools, no desktop window, CPU only.
 - The WebView2 build may hit renderer crash loops in some environments; use the console build when unstable.
 - The transcode cache is cleared when the program exits; the next start transcodes again (`--vkeep` keeps it).
 - A single instance per port; if the port is taken, startup fails with a message.
