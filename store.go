@@ -72,6 +72,14 @@ type QCInfo struct {
 	ExpUnder bool     `json:"expUnder,omitempty"`
 	ExpOver  bool     `json:"expOver,omitempty"`
 	Boxes    []qc.Box `json:"boxes,omitempty"`
+	// 估算值快照（仅用于徽标旁显示「模糊0.83」这类提示，不参与判定/阈值）：
+	// 取自检测时各 DetectorOut.Conf / Exposure.Mean / Shake.Amp 的快照，落库时一并序列化进 detail。
+	BlurConf  float64 `json:"blurConf,omitempty"`
+	NoiseConf float64 `json:"noiseConf,omitempty"`
+	BlankConf float64 `json:"blankConf,omitempty"`
+	DirtConf  float64 `json:"dirtConf,omitempty"`
+	ExpMean   float64 `json:"expMean,omitempty"`
+	ShakeAmp  float64 `json:"shakeAmp,omitempty"`
 }
 
 // qcInfoFromResult 由 qc.QCResult 构造前端 DTO。
@@ -98,6 +106,24 @@ func qcInfoFromResult(r *qc.QCResult) *QCInfo {
 	}
 	if r.Exposure != nil {
 		info.ExpUnder, info.ExpOver = r.Exposure.Under, r.Exposure.Over
+		info.ExpMean = r.Exposure.Mean
+	}
+	// 估算值快照：仅展示用，不改判定。detail 里 DetectorOut.Conf / Shake.Amp 已随 QCResult 序列化，
+	// 从库里回读（qcInfoFromDetail）也能拿到；实时检测路径直接来自 r.*。
+	if r.Blur != nil {
+		info.BlurConf = r.Blur.Conf
+	}
+	if r.Noise != nil {
+		info.NoiseConf = r.Noise.Conf
+	}
+	if r.Blank != nil {
+		info.BlankConf = r.Blank.Conf
+	}
+	if r.LensDirt != nil {
+		info.DirtConf = r.LensDirt.Conf
+	}
+	if r.Shake != nil {
+		info.ShakeAmp = r.Shake.Amp
 	}
 	return info
 }
@@ -128,6 +154,11 @@ type Store struct {
 	statAt   time.Time
 	statMap  map[int64]*folderStat
 	childSet map[int64]bool
+
+	// qcVerFn 返回当前生效的 qc_version。默认 = qc.QCVersion（行为同旧版）；
+	// 调阈值时由 app 装配处注入 qc.VersionFor(当前阈值)——落库 / HasQC / 报表
+	// 全部按它比对，阈值一改旧结果自动失配重跑，改回默认自动复用。
+	qcVerFn func() int
 }
 
 type folderStat struct {
@@ -135,7 +166,24 @@ type folderStat struct {
 }
 
 func NewStore(db *sql.DB, root string) *Store {
-	return &Store{db: db, root: root}
+	return &Store{db: db, root: root, qcVerFn: func() int { return qc.QCVersion }}
+}
+
+// SetQCVersionFn 注入"当前生效 qc_version"。传 nil 恢复默认（qc.QCVersion）。
+func (s *Store) SetQCVersionFn(fn func() int) {
+	if fn == nil {
+		fn = func() int { return qc.QCVersion }
+	}
+	s.qcVerFn = fn
+}
+
+// curQCVersion 当前生效版本。落库 / HasQC / 报表必须共用这一个口径，
+// 否则会出现"写的版本和比对的版本不一致"→ 永远重跑或永远不重跑。
+func (s *Store) curQCVersion() int {
+	if s.qcVerFn == nil {
+		return qc.QCVersion
+	}
+	return s.qcVerFn()
 }
 
 func (s *Store) Root() string {
@@ -622,8 +670,10 @@ func (s *Store) SetFolderReview(folderID int64, decision int, reviewer string) (
 	return n, nil
 }
 
-// FolderMarkCounts 统计某目录「本层」（不递归、present=1）已被标记的文件数，
+// FolderMarkCounts 统计某目录「本层」（不递归、present=1）有 review 行的文件数
+// （含 decision=0 的"清除标记"遗留行——这是「清空本目录标记」要抹掉的行数），
 // 以及其中 reviewer==user 的数量。给「清空本目录标记」的确认弹窗做预览用。
+// ⚠️ 目录进度条要的是"已完成审阅"（decision 1/2），用 FolderDoneCount，别用这个。
 func (s *Store) FolderMarkCounts(folderID int64, user string) (int, int, error) {
 	var total, mine int
 	err := s.db.QueryRow(`SELECT COUNT(*),
@@ -631,6 +681,15 @@ func (s *Store) FolderMarkCounts(folderID int64, user string) (int, int, error) 
 		FROM file f JOIN review r ON r.file_id = f.id
 		WHERE f.folder_id = ? AND f.present = 1`, user, folderID).Scan(&total, &mine)
 	return total, mine, err
+}
+
+// FolderDoneCount 本层「已完成审阅」数 = decision 1/2 的本层文件数。
+// decision=0 的清除行不算（否则进度条会把"标了又清"的也算成已审）。
+func (s *Store) FolderDoneCount(folderID int64) (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM file f JOIN review r ON r.file_id = f.id
+		WHERE f.folder_id = ? AND f.present = 1 AND r.decision IN (1, 2)`, folderID).Scan(&n)
+	return n, err
 }
 
 // FolderDescendants 返回某目录及其所有子孙目录 id，打包下载时用。
@@ -878,7 +937,7 @@ func (s *Store) SaveQC(fileID int64, res *qc.QCResult, size, mtime int64, device
 			flags=excluded.flags, detail=excluded.detail, dup_hash=excluded.dup_hash,
 			device=excluded.device, shoot_key=excluded.shoot_key,
 			size=excluded.size, mtime=excluded.mtime, qc_version=excluded.qc_version, updated_at=excluded.updated_at`,
-		fileID, flags, detail, hash, device, shootKey, size, mtime, qc.QCVersion, time.Now().Unix())
+		fileID, flags, detail, hash, device, shootKey, size, mtime, s.curQCVersion(), time.Now().Unix())
 	return err
 }
 
@@ -897,7 +956,7 @@ type QCRow struct {
 // 几千行也就几 MB，一次拉完比逐条查省事。
 func (s *Store) AllQCRows() ([]QCRow, error) {
 	rows, err := s.db.Query(`SELECT q.file_id, f.rel_path, q.flags, q.dup_hash, q.detail, q.device, q.shoot_key
-		FROM qc q JOIN file f ON f.id = q.file_id WHERE q.qc_version = ?`, qc.QCVersion)
+		FROM qc q JOIN file f ON f.id = q.file_id WHERE q.qc_version = ?`, s.curQCVersion())
 	if err != nil {
 		return nil, err
 	}
@@ -987,7 +1046,7 @@ func (s *Store) QCIssues(folderIDs []int64) ([]QCIssue, error) {
 		JOIN qc ON qc.file_id = f.id AND qc.flags != 0 AND qc.qc_version = ?
 		LEFT JOIN review r ON r.file_id = f.id
 		WHERE f.present = 1 AND f.folder_id IN (`
-	args := []any{qc.QCVersion}
+	args := []any{s.curQCVersion()}
 	for i, id := range folderIDs {
 		if i > 0 {
 			q += ","
@@ -1096,7 +1155,7 @@ func (s *Store) HasQC(fileID, size, mtime int64) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return ver == qc.QCVersion && sz == size && mt == mtime, nil
+	return ver == int64(s.curQCVersion()) && sz == size && mt == mtime, nil
 }
 
 // MarkProcessed 标记某个媒体已生成可浏览预览/转码产物（仪表盘「已处理」用）。

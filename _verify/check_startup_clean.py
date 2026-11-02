@@ -43,6 +43,9 @@ def fresh_dir(path):
 def get(path, raw=False):
     r = urllib.request.Request('http://127.0.0.1:%d%s' % (PORT, path))
     r.add_header('X-User', 'verifier')
+    # 下载/预热类接口按安全要求只认 Cookie 口令（?t= 已关闭）。
+    # 不带这个 Cookie，/api/vtrans-warmup 会回 403 文本，wait_warm 只能空转到超时（曾让本套件白跑 ~20 分钟）。
+    r.add_header('Cookie', 'mr_dl=' + TOKEN)
     b = OP.open(r, timeout=60).read()
     return b if raw else json.loads(b.decode('utf-8'))
 

@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"medreview/qc"
 )
 
 // ---------------------------------------------------------------- 运行参数
@@ -170,6 +172,11 @@ func newApp(cfg appConfig, logs *logRing, logPath string) (*app, error) {
 	a.qc.SetHWChoice(a.cfg.qcHW)
 	// 探测结论存库：硬件不变的话下次启动直接复用，省掉 4 段 30 秒素材的试跑（~7 秒）
 	a.qc.SetMetaStore(a.store)
+	// 判定阈值：启动时恢复上次调整值（故意不重跑——盘上的结果就是按它算的），
+	// 并把生效 qc_version 接到阈值指纹上：运行中改阈值 → 旧结果失配自动重跑；
+	// 改回默认 → 指纹归零，未被覆盖的默认结果直接复用。见 qc/thresholds.go。
+	a.qc.LoadThresholdsStored()
+	a.store.SetQCVersionFn(func() int { return qc.VersionFor(a.qc.CurrentThresholds()) })
 	// 扫描完成后 invalidate 掉目录计数缓存，并按用户定的顺序串行跑四步：
 	// ① 图片转码预热 → ② 图片 QC → ③ 视频转码 → ④ 视频 QC（2026-10-01）。
 	// 全在一个后台 goroutine 里顺序执行 —— 视频转码/QC 都是重活，和图片的混跑

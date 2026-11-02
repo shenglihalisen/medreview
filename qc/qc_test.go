@@ -17,12 +17,13 @@ func makeGray(q int, fn func(x, y int) byte) []byte {
 }
 
 func TestDetectBlank(t *testing.T) {
+	th := DefaultThresholds()
 	black := makeGray(64, func(x, y int) byte { return 0 })
-	if ok, _ := detectBlank(black, 64); !ok {
+	if ok, _ := detectBlank(black, 64, th.BlankStd); !ok {
 		t.Fatal("全黑应判空镜")
 	}
 	grad := makeGray(64, func(x, y int) byte { return byte(x * 4 % 256) })
-	if ok, _ := detectBlank(grad, 64); ok {
+	if ok, _ := detectBlank(grad, 64, th.BlankStd); ok {
 		t.Fatal("渐变图不应判空镜")
 	}
 }
@@ -69,18 +70,19 @@ func TestDetectLensDirt(t *testing.T) {
 
 func TestDetectExposure(t *testing.T) {
 	q := 64
+	th := DefaultThresholds()
 	// 欠曝：整帧压到死黑
-	e := detectExposure(makeGray(q, func(x, y int) byte { return 0 }), q)
+	e := detectExposure(makeGray(q, func(x, y int) byte { return 0 }), q, th.ExpUnder, th.ExpOver)
 	if !e.Under || e.Over {
 		t.Fatalf("全黑应判欠曝: %+v", e)
 	}
 	// 过曝：整帧糊到死白
-	e = detectExposure(makeGray(q, func(x, y int) byte { return 255 }), q)
+	e = detectExposure(makeGray(q, func(x, y int) byte { return 255 }), q, th.ExpUnder, th.ExpOver)
 	if !e.Over || e.Under {
 		t.Fatalf("全白应判过曝: %+v", e)
 	}
 	// 正常曝光：中间调且有层次，两个方向都不该命中
-	e = detectExposure(makeGray(q, func(x, y int) byte { return byte(90 + (x*2+y)%60) }), q)
+	e = detectExposure(makeGray(q, func(x, y int) byte { return byte(90 + (x*2+y)%60) }), q, th.ExpUnder, th.ExpOver)
 	if e.Under || e.Over {
 		t.Fatalf("正常曝光不应命中: %+v", e)
 	}
@@ -90,7 +92,7 @@ func TestDetectExposure(t *testing.T) {
 			return 250 // 白纸
 		}
 		return 60 // 字迹
-	}), q)
+	}), q, th.ExpUnder, th.ExpOver)
 	if e.Over {
 		t.Fatalf("白底文档不应判过曝: %+v", e)
 	}

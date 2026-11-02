@@ -111,10 +111,39 @@
   .sheet .panel h3{margin:0 0 4px; font-size:16px;}
   .sheet .panel button{width:100%; text-align:left;}
 
-  #toast{position:fixed; left:50%; bottom:80px; transform:translateX(-50%); z-index:90; background:#000; color:#fff;
-    padding:10px 16px; border-radius:10px; font-size:13px; opacity:0; transition:opacity .2s; pointer-events:none; max-width:90%; text-align:center;}
-  #toast.on{opacity:.95;}
+  #toast{position:fixed; left:50%; bottom:80px; transform:translateX(-50%) translateY(8px); z-index:90; background:#000; color:#fff;
+    padding:10px 16px; border-radius:10px; font-size:13px; opacity:0; transition:opacity .2s, transform .2s; pointer-events:none; max-width:90%; text-align:center;}
+  #toast.on{opacity:.95; transform:translateX(-50%) translateY(0);}
   .loadmore{text-align:center; padding:14px; color:var(--fg2); font-size:13px;}
+
+  /* ---------- 动效（display 切换会重启动画：打开类全用 keyframes，零 JS） ---------- */
+  @keyframes mFadeIn{from{opacity:0}}
+  @keyframes sheetUp{from{transform:translateY(30px)}}
+  @keyframes cellIn{from{opacity:0; transform:translateY(6px)}}
+  @keyframes qcIn{from{opacity:0; transform:scale(.8)}}
+  .sheet{animation:mFadeIn .18s ease-out;}
+  .sheet .panel{animation:sheetUp .22s cubic-bezier(.2,.8,.3,1);}
+  #lightbox{animation:mFadeIn .18s ease-out;}
+  #app{animation:mFadeIn .2s ease-out;}
+  .cell{animation:cellIn .22s ease-out backwards;}
+  .cell .qc span, #lbInfo .qctags span{animation:qcIn .18s ease-out backwards;}
+  @media (prefers-reduced-motion: reduce){ *{animation-duration:.01ms !important; transition-duration:.01ms !important;} }
+
+  /* ---------- 灯箱滑动标记（卡牌堆叠） ---------- */
+  #lbTop .mode-btn{flex:none; padding:6px 10px; font-size:12px; border-radius:8px;}
+  #lbDeck{position:absolute; inset:0; display:flex; align-items:center; justify-content:center; pointer-events:none;}
+  .deck-card{position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    transition:transform .22s ease-out, opacity .22s ease-out; will-change:transform;}
+  .deck-card img{max-width:96%; max-height:96%; width:auto; height:auto; display:block;}
+  .deck-card.behind1{transform:scale(.94) translateY(12px); opacity:.6;}
+  .deck-card.behind2{transform:scale(.88) translateY(22px); opacity:.35;}
+  .deck-card.top{z-index:2;}
+  .deck-card.fly-right{transform:translateX(130%) rotate(12deg) !important; opacity:0;}
+  .deck-card.fly-left{transform:translateX(-130%) rotate(-12deg) !important; opacity:0;}
+  #lbSwipeHint{position:absolute; inset:0; z-index:3; display:flex; align-items:center; justify-content:center;
+    pointer-events:none; opacity:0; font-size:26px; font-weight:700; letter-spacing:3px;}
+  #lbSwipeHint.keep{color:var(--keep); background:rgba(63,185,80,.15);}
+  #lbSwipeHint.reject{color:var(--reject); background:rgba(248,81,73,.15);}
 </style>
 </head>
 <body>
@@ -176,10 +205,12 @@
     <button id="lbPrev" style="padding:6px 10px">‹</button>
     <span id="lbCount" class="muted" style="font-size:12px"></span>
     <button id="lbNext" style="padding:6px 10px">›</button>
+    <button id="lbMode" class="mode-btn">手势：点按</button>
   </div>
   <div id="lbBody">
     <div class="boxlayer" id="lbBoxes"></div>
     <div id="lbMsg" class="hidden"></div>
+    <div id="lbSwipeHint"></div>
   </div>
   <div id="lbInfo">
     <div class="name" id="lbName"></div>
@@ -421,10 +452,14 @@
     if(empty){ grid.innerHTML='<div class="muted" style="grid-column:1/-1;padding:30px;text-align:center">这个目录（及筛选）下没有文件</div>'; return; }
     // 增量：只追加还没渲染的（简单做法：按 id 记录已渲染）
     if(!grid._rendered) grid._rendered={};
+    var fresh=0;
     S.files.forEach(function(f){
       if(grid._rendered[f.id]) return;
       grid._rendered[f.id]=true;
-      grid.appendChild(makeCell(f));
+      var cell=makeCell(f);
+      cell.style.animationDelay=Math.min(fresh,11)*30+'ms';
+      fresh++;
+      grid.appendChild(cell);
     });
     $('loadmore').textContent = S.hasMore ? '下拉到底自动加载更多' : '已经到底了';
   }
@@ -517,10 +552,11 @@
   }
   function qcTags(qc){
     var t=[];
-    if(qc.dup)t.push('重复'); if(qc.corrupt)t.push('损坏'); if(qc.blank)t.push('空镜');
-    if(qc.dirt)t.push('脏污'); if(qc.blur)t.push('模糊');
-    if(qc.expUnder)t.push('欠曝'); else if(qc.expOver)t.push('过曝'); else if(qc.exposure)t.push('曝光');
-    if(qc.noise)t.push('噪点'); if(qc.shake)t.push('抖动');
+    var num=function(v){return (typeof v==='number'&&!isNaN(v))?v.toFixed(2):'';};
+    if(qc.dup)t.push('重复'); if(qc.corrupt)t.push('损坏'); if(qc.blank)t.push('空镜'+num(qc.blankConf));
+    if(qc.dirt)t.push('脏污'+num(qc.dirtConf)); if(qc.blur)t.push('模糊'+num(qc.blurConf));
+    if(qc.expUnder)t.push('欠曝'+num(qc.expMean)); else if(qc.expOver)t.push('过曝'+num(qc.expMean)); else if(qc.exposure)t.push('曝光'+num(qc.expMean));
+    if(qc.noise)t.push('噪点'+num(qc.noiseConf)); if(qc.shake)t.push('抖动'+num(qc.shakeAmp));
     return t;
   }
 
@@ -537,14 +573,16 @@
   function renderLightbox(){
     var f=S.files[S.lbIndex];
     if(!f) return;
+    lbDeckRef=null; // 每次重建清引用：视频页/点按模式没有卡牌，滑动提示层不会误闪
     // 清理上一个视频
     if(lbCleanup){ try{lbCleanup();}catch(e){} lbCleanup=null; }
     var body=$('lbBody');
-    // 移除旧 img/video（保留 boxlayer 与 msg）
+    // 移除旧 img/video（保留 boxlayer、msg、滑动提示层；卡牌堆叠由滑动分支重建）
     Array.prototype.slice.call(body.childNodes).forEach(function(n){
-      if(n.id!=='lbBoxes' && n.id!=='lbMsg') body.removeChild(n);
+      if(n.id!=='lbBoxes' && n.id!=='lbMsg' && n.id!=='lbSwipeHint') body.removeChild(n);
     });
     $('lbBoxes').innerHTML=''; $('lbMsg').classList.add('hidden');
+    var hintEl=$('lbSwipeHint'); if(hintEl){ hintEl.style.opacity='0'; hintEl.className=''; }
     $('lbName').textContent=f.name;
     $('lbCount').textContent=(S.lbIndex+1)+' / '+S.files.length;
     $('lbPrev').disabled = S.lbIndex<=0;
@@ -561,6 +599,8 @@
 
     if(f.kind===2){
       loadVideo(f.id, body);
+    } else if(lbMode==='swipe'){
+      buildSwipeDeck(f, body);
     } else {
       var img=document.createElement('img');
       img.src=mediaURL(f.id);
@@ -582,19 +622,18 @@
       }
     }
   }
-  function drawBoxes(img, boxes){
-    // 以图片显示区域为基准（object-fit 默认，这里 img 是 width/height auto，按原始比例显示）
-    // 用图片在容器内的实际渲染矩形换算
-    var layer=$('lbBoxes');
-    var rect=img.getBoundingClientRect();
-    var bodyRect=$('lbBody').getBoundingClientRect();
-    var left=rect.left-bodyRect.left, top=rect.top-bodyRect.top;
+  function drawBoxes(img, boxes, layer){
+    // 用布局坐标（offsetLeft/clientWidth）而不是 getBoundingClientRect：
+    // 后者是屏幕坐标，卡牌带 transform（拖动/旋转）时换算会错位；布局坐标不受变换影响。
+    // layer 省略 = 点按模式的 lbBoxes 全屏层；滑动模式传入顶卡内的 boxlayer。
+    layer = layer || $('lbBoxes');
+    var left=img.offsetLeft, top=img.offsetTop, w=img.clientWidth, h=img.clientHeight;
     boxes.forEach(function(b){
       var d=document.createElement('div'); d.className='qcbox';
-      d.style.left=(left + b.x*rect.width)+'px';
-      d.style.top=(top + b.y*rect.height)+'px';
-      d.style.width=(b.w*rect.width)+'px';
-      d.style.height=(b.h*rect.height)+'px';
+      d.style.left=(left + b.x*w)+'px';
+      d.style.top=(top + b.y*h)+'px';
+      d.style.width=(b.w*w)+'px';
+      d.style.height=(b.h*h)+'px';
       layer.appendChild(d);
     });
   }
@@ -641,13 +680,16 @@
   }
 
   function applyDecision(id, decision){
-    postApi('/api/review',{fileId:id, decision:decision}).then(function(d){
-      var f=S.files[S.lbIndex];
-      if(f && f.id===id) f.decision=decision;
-      updateCellDecision(id, decision);
+    return postApi('/api/review',{fileId:id, decision:decision}).then(function(d){
+      var blocked = d && d.blocked>0;
+      // 按 id 找文件：滑动标记会先前进索引，S.lbIndex 未必还指着它
+      var f=null; S.files.forEach(function(x){ if(x.id===id) f=x; });
+      if(f && !blocked) f.decision=decision;   // 被认领锁挡下时不动本地状态
+      if(!blocked) updateCellDecision(id, decision);
       api('/api/status').then(refreshTotals).catch(function(){});
-      if(d && d.blocked>0) toast('该目录已被他人认领，无法修改');
-    }).catch(function(e){ toast('标记失败：'+(e.message||e)); });
+      if(blocked) toast('该目录已被他人认领，无法修改');
+      return d;
+    }).catch(function(e){ toast('标记失败：'+(e.message||e)); return null; });
   }
 
   $('lbClose').onclick=function(){ $('lightbox').classList.add('hidden'); };
@@ -657,14 +699,170 @@
   $('lbPrev').onclick=function(){ if(S.lbIndex>0){ S.lbIndex--; renderLightbox(); } };
   $('lbNext').onclick=function(){ if(S.lbIndex<S.files.length-1){ S.lbIndex++; renderLightbox(); } };
 
-  // 灯箱左右滑动
-  var touchX=null;
-  $('lbBody').addEventListener('touchstart',function(e){ if(e.touches&&e.touches[0]) touchX=e.touches[0].clientX; },{passive:true});
-  $('lbBody').addEventListener('touchend',function(e){
-    if(touchX===null||!e.changedTouches[0]) return;
-    var dx=e.changedTouches[0].clientX-touchX; touchX=null;
-    if(Math.abs(dx)>60){ if(dx<0 && S.lbIndex<S.files.length-1){S.lbIndex++;renderLightbox();} else if(dx>0&&S.lbIndex>0){S.lbIndex--;renderLightbox();} }
+  // ---------- 灯箱手势：点按(滑动=翻页) / 滑动(左✕不保留 右✓保留, 卡牌堆叠) ----------
+  var lbMode=function(){ try{ return localStorage.getItem('mr_lb_mode')==='swipe'?'swipe':'tap'; }catch(e){ return 'tap'; } }();
+  var lbSwipe={active:false,multi:false,sx:0,sy:0,dx:0,dy:0};
+  var lbDeckRef=null; // {top,img,f,flying} 滑动模式的卡牌引用
+
+  function lbModeLabel(){ return lbMode==='swipe'?'滑动':'点按'; }
+  $('lbMode').textContent='手势：'+lbModeLabel();
+  $('lbMode').onclick=function(){
+    lbMode = lbMode==='swipe' ? 'tap' : 'swipe';
+    try{ localStorage.setItem('mr_lb_mode', lbMode); }catch(e){}
+    $('lbMode').textContent='手势：'+lbModeLabel();
+    if(!$('lightbox').classList.contains('hidden')) renderLightbox();
+    showModeSheet();
+  };
+
+  function showModeSheet(){
+    var sheet=document.createElement('div'); sheet.className='sheet';
+    var panel=document.createElement('div'); panel.className='panel';
+    var h=document.createElement('h3'); h.textContent=lbMode==='swipe'?'滑动模式':'点按模式';
+    panel.appendChild(h);
+    var tips = lbMode==='swipe' ? [
+      '右滑 = ✓ 保留，左滑 = ✕ 不保留',
+      '标记后自动跳下一张；最后一张标完自动关闭灯箱',
+      '没滑到头（80px）松手会弹回，不会误标',
+      '视频页仍是滑动翻页；底部按钮两种模式都可用'
+    ] : [
+      '底部按钮标记（✓ / ✕ / 未定）',
+      '左右滑动翻页'
+    ];
+    tips.forEach(function(t){ var p=document.createElement('div'); p.className='muted'; p.style.fontSize='13px'; p.textContent=t; panel.appendChild(p); });
+    var ok=document.createElement('button'); ok.className='primary'; ok.textContent='知道了';
+    ok.onclick=function(){ sheet.remove(); };
+    panel.appendChild(ok);
+    sheet.appendChild(panel);
+    sheet.addEventListener('click',function(e){ if(e.target===sheet) sheet.remove(); });
+    document.body.appendChild(sheet);
+  }
+
+  // 滑动模式的卡牌堆叠：当前图在顶卡，后面垫最多 2 张（跳过视频页）
+  function buildSwipeDeck(f, body){
+    var deck=document.createElement('div'); deck.id='lbDeck';
+    var behinds=[S.lbIndex+1, S.lbIndex+2].filter(function(i){
+      return i<S.files.length && S.files[i].kind!==2;
+    });
+    behinds.forEach(function(i, bi){
+      var c=document.createElement('div'); c.className='deck-card '+(bi===0?'behind1':'behind2');
+      var im=document.createElement('img'); im.src=mediaURL(S.files[i].id); im.alt='';
+      c.appendChild(im); deck.appendChild(c);
+    });
+    var top=document.createElement('div'); top.className='deck-card top';
+    var img=document.createElement('img'); img.src=mediaURL(f.id); img.alt=f.name;
+    top.appendChild(img);
+    // QC 脏点红框画在顶卡内的专属图层：卡被拖动/旋转/飞出时红框跟手
+    var boxLayer=document.createElement('div'); boxLayer.className='boxlayer';
+    top.appendChild(boxLayer);
+    if(f.qc && f.qc.boxes && f.qc.boxes.length){
+      img.onload=function(){ boxLayer.innerHTML=''; drawBoxes(img, f.qc.boxes, boxLayer); };
+      if(img.complete) img.onload();
+    }
+    deck.appendChild(top);
+    body.insertBefore(deck, $('lbBoxes'));
+    lbDeckRef={top:top, img:img, f:f, flying:false};
+    // 看原图（与点按模式同款，指向顶卡 img）
+    var ob=document.createElement('button');
+    ob.textContent='看原图'; ob.style.cssText='position:absolute;right:8px;bottom:8px;padding:5px 10px;font-size:12px;z-index:2';
+    ob.onclick=function(){
+      if(img.dataset.orig==='1'){ img.src=mediaURL(f.id); img.dataset.orig=''; ob.textContent='看原图'; }
+      else { img.src=mediaURL(f.id,true); img.dataset.orig='1'; ob.textContent='看预览'; }
+    };
+    body.appendChild(ob);
+  }
+
+  $('lbBody').addEventListener('touchstart',function(e){
+    lbSwipe.active=!!(e.touches&&e.touches.length===1);
+    lbSwipe.multi=!!(e.touches&&e.touches.length>1);
+    if(lbSwipe.active){ lbSwipe.sx=e.touches[0].clientX; lbSwipe.sy=e.touches[0].clientY; lbSwipe.dx=0; lbSwipe.dy=0; }
   },{passive:true});
+  $('lbBody').addEventListener('touchmove',function(e){
+    if(!lbSwipe.active||lbSwipe.multi) return;
+    if(!e.touches||e.touches.length!==1){ lbSwipe.multi=true; swipeResetCard(); return; }
+    lbSwipe.dx=e.touches[0].clientX-lbSwipe.sx;
+    lbSwipe.dy=e.touches[0].clientY-lbSwipe.sy;
+    swipeTrack();
+  },{passive:true});
+  $('lbBody').addEventListener('touchend',function(e){
+    if(!lbSwipe.active) return;
+    lbSwipe.active=false;
+    if(lbDeckRef && lbDeckRef.flying) return; // 卡牌飞出动画中：忽略收尾触摸，别把飞行的卡拽回屏中
+    if(lbSwipe.multi||!e.changedTouches||!e.changedTouches[0]) return;
+    var dx=e.changedTouches[0].clientX-lbSwipe.sx;
+    var dy=e.changedTouches[0].clientY-lbSwipe.sy;
+    var f=S.files[S.lbIndex]; if(!f) return;
+    var swipeMode = lbMode==='swipe' && f.kind!==2; // 视频页不做滑动标记
+    if(swipeMode && Math.abs(dx)>=80 && Math.abs(dx)>Math.abs(dy)*1.5){
+      swipeMark(dx>0?1:2);
+      return;
+    }
+    swipeResetCard();
+    if(!swipeMode && Math.abs(dx)>60){
+      if(dx<0 && S.lbIndex<S.files.length-1){ S.lbIndex++; renderLightbox(); }
+      else if(dx>0 && S.lbIndex>0){ S.lbIndex--; renderLightbox(); }
+    }
+  },{passive:true});
+
+  function swipeTrack(){
+    var d=lbDeckRef; if(!d||d.flying) return;
+    var dx=lbSwipe.dx, dy=lbSwipe.dy;
+    d.top.style.transition='none';
+    d.top.style.transform='translateX('+dx+'px) rotate('+(dx*0.05)+'deg)';
+    var hint=$('lbSwipeHint'); if(!hint) return;
+    if(Math.abs(dx)>30 && Math.abs(dx)>Math.abs(dy)*1.2){
+      hint.className = dx>0 ? 'keep' : 'reject';
+      hint.textContent = dx>0 ? '✓ 保留' : '✕ 不保留';
+      hint.style.opacity = String(Math.min(1, Math.abs(dx)/80));
+    } else {
+      hint.style.opacity='0';
+    }
+  }
+  function swipeResetCard(){
+    var d=lbDeckRef; if(!d) return;
+    d.top.style.transition='';
+    d.top.style.transform='';
+    var hint=$('lbSwipeHint'); if(hint) hint.style.opacity='0';
+  }
+  function swipeMark(dec){
+    var d=lbDeckRef; if(!d||d.flying) return;
+    var f=d.f;
+    var prevDec=f.decision;
+    d.flying=true;
+    f.decision=dec;                    // 乐观：本地先标（被锁/网络失败会回滚，见下）
+    updateCellDecision(f.id, dec);
+    var hint=$('lbSwipeHint'); if(hint) hint.style.opacity='0';
+    // 飞出动画交给克隆"幽灵卡"：原卡当场让位，连滑不阻塞（240ms 锁窗内不丢标）
+    var ghost=d.top.cloneNode(true);
+    ghost.classList.remove('top');
+    ghost.style.cssText='position:absolute;inset:0;z-index:4;pointer-events:none;transition:transform .25s ease-in, opacity .25s ease-in;';
+    var ghostTx='translateX('+(dec===1?'130%':'-130%')+') rotate('+(dec===1?12:-12)+'deg)';
+    var isLast = S.lbIndex >= S.files.length-1;
+    if(isLast){
+      toast('已到最后一张，灯箱关闭');
+      $('lightbox').classList.add('hidden');
+    } else {
+      S.lbIndex++;
+      renderLightbox();                // 立即重建：下一张马上可继续滑
+      $('lbBody').appendChild(ghost);  // 渲染后再挂幽灵（否则会被 renderLightbox 清理掉）
+      requestAnimationFrame(function(){ ghost.style.transform=ghostTx; ghost.style.opacity='0'; });
+      setTimeout(function(){ if(ghost.parentNode) ghost.remove(); }, 320);
+    }
+    applyDecision(f.id, dec).then(function(d2){
+      var blocked = d2 && d2.blocked>0;
+      if(blocked){
+        // 被认领锁挡下：回滚本地状态并退回这张重看
+        f.decision=prevDec; updateCellDecision(f.id, prevDec);
+        if(isLast) return;
+        var idx=S.files.indexOf(f);
+        if(idx>=0){ S.lbIndex=idx; renderLightbox(); }
+        return;
+      }
+      if(!d2){
+        // 网络失败（toast 已提示）：只回滚本地标记，不打断已前进的浏览
+        f.decision=prevDec; updateCellDecision(f.id, prevDec);
+      }
+    });
+  }
 
   // ---------- 选择模式 ----------
   function setSelectMode(on){

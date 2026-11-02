@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -356,8 +358,9 @@ func (m *QCManager) runOne(ctx context.Context, f FileItem) {
 				log.Printf("QC: %s 重复像素确认失败，跳过: %v", f.RelPath, perr)
 				continue
 			}
-			// 图片 5%；视频 1%（远景主体小，帧差占比天然低，阈值必须收紧）
-			thresh := qc.DupPixelDiffThresh
+			// 图片：相似度阈值（默认 0.95 ⇔ 差异 5%），运行时可调；差异占比 = 1 - 相似度。
+			// 视频 1%（远景主体小，帧差占比天然低，阈值必须收紧，保持固定不暴露）
+			thresh := 1 - m.svc.CurrentThresholds().DupSim
 			if f.Kind == 2 {
 				thresh = qc.DupPixelDiffThreshVideo
 			}
@@ -435,7 +438,7 @@ func (m *QCManager) reconcile(ctx context.Context) {
 			continue
 		}
 		ratio, perr := m.svc.PixelDiffRatio(ctx, m.store.absPath(mA.RelPath), m.store.absPath(mB.RelPath), false)
-		if perr == nil && ratio > qc.DupPixelDiffThresh {
+		if perr == nil && ratio > 1-m.svc.CurrentThresholds().DupSim {
 			log.Printf("QC: 对账像素确认撤销重复 %s（与锚差异 %.1f%%）", mB.Name, ratio*100)
 			plan[memberID] = nf &^ qc.FlagDup
 		}
@@ -487,4 +490,86 @@ func (m *QCManager) SetMetaStore(ms qc.MetaStore) {
 	if m.svc != nil {
 		m.svc.SetMetaStore(ms)
 	}
+}
+
+// metaKeyThresholds 判定阈值在 meta 表里的键（JSON）。
+const metaKeyThresholds = "qc_thresholds"
+
+// CurrentThresholds 当前生效的判定阈值（/api/qc/thresholds 读）。
+func (m *QCManager) CurrentThresholds() qc.Thresholds {
+	if m.svc == nil {
+		return qc.DefaultThresholds()
+	}
+	return m.svc.CurrentThresholds()
+}
+
+// LoadThresholdsStored 启动时从 meta 恢复上次调整的判定阈值。
+//
+// ⚠️ 故意**不触发重跑**：盘上的 qc 结果就是按这套阈值算出来的（qc_version 指纹
+// 一致，HasQC 正常跳过）。只有运行中真的改了阈值才需要失效重跑。
+func (m *QCManager) LoadThresholdsStored() {
+	if m.svc == nil || m.store == nil {
+		return
+	}
+	raw := m.store.MetaGet(metaKeyThresholds)
+	if raw == "" {
+		return
+	}
+	var t qc.Thresholds
+	if err := json.Unmarshal([]byte(raw), &t); err != nil {
+		log.Printf("QC: 恢复阈值失败（用默认值）: %v", err)
+		return
+	}
+	t = qc.ClampThresholds(t)
+	m.svc.SetThresholds(t)
+	log.Printf("QC: 已恢复上次调整的判定阈值 %+v", t)
+}
+
+// SetThresholds 应用新的判定阈值：生效 + 存 meta + 全量重跑。
+//
+// 与当前完全一致则 no-op（返回 0，不重跑）。失效机制在 qc.VersionFor：阈值一变
+// 指纹变 → qc 表旧行 qc_version 失配 → HasQC 全部判无效 → 按新阈值重算；
+// 改回默认 → 指纹归零与默认结果对上（未被覆盖的行直接复用）。
+// 返回需要重跑的文件数（前端拿去提示"将重新检测 N 个"）。
+func (m *QCManager) SetThresholds(t qc.Thresholds) (int, error) {
+	if m.svc == nil || !m.svc.Available() {
+		return 0, errors.New("QC 不可用（缺少 ffmpeg），无法调阈值")
+	}
+	t = qc.ClampThresholds(t)
+	if m.svc.CurrentThresholds() == t {
+		return 0, nil // 一个数都没变：不落库、不重跑
+	}
+	m.svc.SetThresholds(t)
+	if b, err := json.Marshal(t); err == nil {
+		if err := m.store.MetaSet(metaKeyThresholds, string(b)); err != nil {
+			log.Printf("QC: 阈值持久化失败（本次运行内仍生效，重启后回到旧值）: %v", err)
+		}
+	} else {
+		log.Printf("QC: 阈值序列化失败（不持久化）: %v", err)
+	}
+	// 正在跑的旧轮次按旧阈值算已无意义：取消，按新阈值全量重来。
+	m.Cancel()
+	return m.requeueAll(), nil
+}
+
+// requeueAll 按当前阈值全量重跑（图片 → 视频串行，同启动顺序 ②④）。
+// 异步执行（WarmKind 内部阻塞，这里立即返回让接口先应答）；返回待跑文件数。
+func (m *QCManager) requeueAll() int {
+	imgs, err1 := m.store.AllMedia(kindImage)
+	vids, err2 := m.store.AllMedia(kindVideo)
+	if err1 != nil || err2 != nil {
+		log.Printf("QC: 重跑前列举媒体失败 img=%v vid=%v", err1, err2)
+		return 0
+	}
+	total := len(imgs) + len(vids)
+	if total == 0 {
+		return 0
+	}
+	go func() {
+		log.Printf("QC: 阈值变更，开始按新阈值全量重跑（图片 %d + 视频 %d）", len(imgs), len(vids))
+		m.WarmKind(kindImage)
+		m.WarmKind(kindVideo)
+		log.Printf("QC: 阈值变更全量重跑完成")
+	}()
+	return total
 }
