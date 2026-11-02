@@ -78,14 +78,16 @@ go build -tags gui -ldflags "-H=windowsgui" -o medreview_ui.exe .
 
 ### 2.3 Linux（headless）
 
-仓库可直接构建**纯静态、无 GUI** 的 Linux 二进制，适合在 NAS / 服务器上常驻（例如打包成 fnOS 原生应用）：
+仓库可直接构建 Linux 版本（无 GUI），两种形态：
 
 ```bash
-./build-linux.sh            # 产物：dist/medreview-linux-amd64
+./build-linux.sh            # 单文件版（约 252 MB）：内嵌 ffmpeg / ffprobe / ImageMagick
+./build-linux.sh --slim     # 精简版（约 12 MB）：工具外置，fnOS 包用这个
 ```
 
-- **ffmpeg 不内嵌**：Linux 构建不会嵌入 ffmpeg。把 `ffmpeg` / `ffprobe` 放到程序同目录的 `tools/ffmpeg/`（`findTool` 优先查这里），或安装到 PATH。
-- **RAW / HEIC**：这类格式依赖 ImageMagick 的 `magick`（放 PATH 即可）；没有也能跑，只是这些格式无法预览/检测。
+- **单文件版（默认）**：构建前把 Linux 版 `ffmpeg`、`ffprobe` 放进 `tools/ffmpeg-linux/`，把静态 `magick` 放进 `tools/imagemagick-linux/`（两者都不入库）。首次运行会把工具释放到 `~/.cache/medreview/`（按文件大小比对，内置版本更新自动重释），之后二进制可拷到任何 Linux 机器直接跑。
+- **精简版（`--slim`）**：不内嵌，运行时在程序目录 `tools/ffmpeg/`、`tools/imagemagick/` 或 `PATH` 里找工具；体积小，适合随包分发（fnOS 原生包即此形态）。
+- **RAW / HEIC**：依赖 ImageMagick 的 `magick`；单文件版已内嵌，精简版需自备（`PATH` 或 `tools/imagemagick/`）。
 - **系统服务**：`packaging/linux/medreview.service` 是可直接改用的 systemd 模板（改路径、用户、素材目录即可）。
 - **硬件加速**：QC 解码的 `auto` 候选为 `cuda → qsv → vaapi`；`-qcdec` 也接受 `vaapi`（设备节点默认自动找 `/dev/dri/renderD128…131`，可用 `MEDREVIEW_VAAPI_DEVICE` 覆盖）。编码仍为 `nvenc` / `qsv` / CPU 三档，VAAPI 编码尚未接入。
 - **打开浏览器**：有桌面环境时用 `xdg-open`；无桌面（服务器）时忽略即可，地址会打印在日志里。
@@ -117,7 +119,9 @@ web/                 审阅页与下载页前端（go:embed 进二进制）
 ui/                  WebView2 本地控制台窗口界面（go:embed 进二进制）
 tools/               build_single.py（单文件化）、make_lnk.py（生成快捷方式）；tools/ffmpeg/ 为内嵌源（不入库）
 _verify/             验收脚本（见第 8 节）
-build-linux.sh       Linux headless 构建脚本
+build-linux.sh       Linux 构建脚本（默认单文件版；--slim 精简版）
+tools/ffmpeg-linux/  Linux 版 ffmpeg/ffprobe（内嵌源，不入库）
+tools/imagemagick-linux/  Linux 版静态 magick（内嵌源，不入库）
 packaging/linux/     systemd 服务模板
 ```
 
@@ -365,14 +369,16 @@ go build -tags gui -ldflags "-H=windowsgui" -o medreview_ui.exe .
 
 ### 2.3 Linux (headless)
 
-The repository builds a **static, GUI-less** Linux binary, suitable for running on a NAS or server (for example, packaging it as a fnOS native app):
+The repository builds a GUI-less Linux binary in two flavours:
 
 ```bash
-./build-linux.sh            # output: dist/medreview-linux-amd64
+./build-linux.sh            # single-file build (~252 MB): embeds ffmpeg / ffprobe / ImageMagick
+./build-linux.sh --slim     # slim build (~12 MB): tools are external; used by the fnOS package
 ```
 
-- **ffmpeg is not embedded** on Linux. Put `ffmpeg` / `ffprobe` next to the binary under `tools/ffmpeg/` (`findTool` checks there first), or install them in `PATH`.
-- **RAW / HEIC**: these formats need ImageMagick's `magick` (in `PATH`); without it the app still runs, those formats just cannot be previewed/checked.
+- **Single-file (default)**: before building, put the Linux `ffmpeg` and `ffprobe` into `tools/ffmpeg-linux/`, and a static `magick` into `tools/imagemagick-linux/` (neither is tracked). On first run the tools are extracted to `~/.cache/medreview/` (size-compared, re-extracted when the embedded version changes), so the binary can be copied to any Linux machine and just run.
+- **Slim (`--slim`)**: nothing embedded; tools are looked up in `tools/ffmpeg/`, `tools/imagemagick/` next to the binary, then `PATH`. Small, good for packaging (the fnOS native package uses this).
+- **RAW / HEIC**: needs ImageMagick's `magick`; the single-file build embeds it, the slim build requires your own (`PATH` or `tools/imagemagick/`).
 - **Service**: `packaging/linux/medreview.service` is a ready-to-adapt systemd unit (adjust paths, user, media root).
 - **Hardware acceleration**: QC decoding tries `cuda → qsv → vaapi` in `auto` mode; `-qcdec` also accepts `vaapi` (the device node is auto-detected at `/dev/dri/renderD128…131`, override with `MEDREVIEW_VAAPI_DEVICE`). Encoding still offers `nvenc` / `qsv` / CPU only; VAAPI encoding is not wired up yet.
 - **Browser**: `xdg-open` is used when a desktop session exists; on headless servers the address is printed to the log instead.
@@ -404,7 +410,9 @@ web/                 Review and download page frontends (go:embed into the binar
 ui/                  WebView2 desktop console UI (go:embed into the binary)
 tools/               build_single.py (single-file build), make_lnk.py (shortcut creation); tools/ffmpeg/ is the embed source (not tracked)
 _verify/             Acceptance scripts (see section 8)
-build-linux.sh       Linux headless build script
+build-linux.sh       Linux build script (single-file by default; --slim for a small build)
+tools/ffmpeg-linux/  Linux ffmpeg/ffprobe (embed source, not tracked)
+tools/imagemagick-linux/  Linux static magick (embed source, not tracked)
 packaging/linux/     systemd unit template
 ```
 
