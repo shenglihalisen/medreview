@@ -1,0 +1,28 @@
+# medreview systemd unit (template - adjust paths, user and root folder)
+#
+#   sudo useradd --system --home /var/lib/medreview --shell /usr/sbin/nologin medreview
+#   sudo mkdir -p /opt/medreview /var/lib/medreview
+#   sudo cp medreview /opt/medreview/ && sudo cp -r tools /opt/medreview/
+#   sudo cp medreview.service /etc/systemd/system/ && sudo systemctl enable --now medreview
+
+[Unit]
+Description=medreview media review service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=medreview
+Group=medreview
+# GPU access (Intel/AMD iGPU): keep the user in video/render groups.
+SupplementaryGroups=video render
+# Optional: pin the VAAPI device node (auto-detected by default).
+#Environment=MEDREVIEW_VAAPI_DEVICE=/dev/dri/renderD128
+WorkingDirectory=/opt/medreview
+ExecStart=/opt/medreview/medreview -root /srv/media -addr :8080 -db /var/lib/medreview/medreview.db -cache /var/lib/medreview/cache -log /var/lib/medreview/medreview.log
+Restart=on-failure
+RestartSec=3
+StateDirectory=medreview
+
+[Install]
+WantedBy=multi-user.target

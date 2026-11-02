@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -422,6 +423,13 @@ func (s *QCService) frameArgs(src string, w, h int, isVideo bool, hw string, lim
 	var vf string
 	args := []string{"-y", "-v", "error"}
 	if hw != "" {
+		// VAAPI 需要显式设备节点（Linux 上 ffmpeg 不会自己猜对）；
+		// cuda/qsv 走默认设备即可。
+		if hw == "vaapi" {
+			if dev := vaapiDevice(); dev != "" {
+				args = append(args, "-vaapi_device", dev)
+			}
+		}
 		args = append(args, "-hwaccel", hw, "-hwaccel_output_format", hw)
 		vf = "hwdownload,format=nv12,"
 	}
@@ -463,19 +471,46 @@ func (s *QCService) openRun(ctx context.Context, src string, w, h int, isVideo b
 // hwCandidates 按用户的选择返回"这次要试哪几条解码路"。
 //
 //	"cpu"/"n"              → 空切片 = 强制软解，一条显卡路都不试
-//	"cuda"/"qsv"/"d3d11va" → 只试点名的这些（逗号分隔可多点，如 "cuda,qsv"）
-//	"auto"/"y"/空           → 三条都试，交给下面的速度择优
+//	"cuda"/"qsv"/"vaapi"/"d3d11va" → 只试点名的这些（逗号分隔可多点，如 "cuda,qsv"）
+//	"auto"/"y"/空           → 平台默认候选全试，交给下面的速度择优
 //
 // 2026-10-04 起拆细：以前只有 y/n 两档，想指定用哪张卡只能自己改代码。
+// 2026-11-02 Linux 适配：Windows 的 d3d11va 在 Linux 不存在，改用 vaapi。
 func hwCandidates(choice string) []string {
 	switch n := normChoice(choice); n {
 	case "cpu":
 		return nil
 	case "auto":
-		return []string{"cuda", "qsv", "d3d11va"}
+		return hwAutoList()
 	default: // 归一后的逗号列表（已排序去重）
 		return strings.Split(n, ",")
 	}
+}
+
+// hwAutoList 「auto」模式下的默认候选，按平台给：
+//   - Windows：cuda（NVIDIA）→ qsv（Intel）→ d3d11va（AMD/通用）
+//   - 其他（Linux）：cuda → qsv → vaapi（Intel/AMD 核显都走 VAAPI；d3d11va 只在 Windows 有）
+func hwAutoList() []string {
+	if runtime.GOOS == "windows" {
+		return []string{"cuda", "qsv", "d3d11va"}
+	}
+	return []string{"cuda", "qsv", "vaapi"}
+}
+
+// vaapiDevice 找 VAAPI 设备节点（Linux）。可用 MEDREVIEW_VAAPI_DEVICE 显式指定；
+// 否则依次试 /dev/dri/renderD128..131。找不到返回空串，交给 ffmpeg 默认行为
+// （多数情况会直接报错，上层按"显卡路不可用"回退软解）。
+func vaapiDevice() string {
+	if d := strings.TrimSpace(os.Getenv("MEDREVIEW_VAAPI_DEVICE")); d != "" {
+		return d
+	}
+	for i := 128; i <= 131; i++ {
+		p := fmt.Sprintf("/dev/dri/renderD%d", i)
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			return p
+		}
+	}
+	return ""
 }
 
 // normChoice 把命令行/接口给的选择归一：cpu / auto / 逗号分隔的候选集（排序去重）。
@@ -498,8 +533,23 @@ func normChoice(choice string) string {
 			c = "cuda"
 		case "qsv":
 			c = "qsv"
-		case "d3d11va", "amf":
-			c = "d3d11va"
+		case "vaapi":
+			c = "vaapi"
+		case "d3d11va":
+			// d3d11va 是 Windows 的 DXVA 路径；Linux 上没有它，
+			// 用户/脚本若沿用老参数（amf、d3d11va），Linux 侧映射到 vaapi。
+			if runtime.GOOS == "windows" {
+				c = "d3d11va"
+			} else {
+				c = "vaapi"
+			}
+		case "amf":
+			// AMF 是 Windows 的 AMD 接口；Linux 的 AMD 硬件走 VAAPI。
+			if runtime.GOOS == "windows" {
+				c = "d3d11va"
+			} else {
+				c = "vaapi"
+			}
 		default:
 			continue
 		}

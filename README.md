@@ -76,6 +76,20 @@ go build -tags gui -ldflags "-H=windowsgui" -o medreview_ui.exe .
 
 > **tag 铁律**：wails 版必须同时带 `desktop` 与 `production`。只写 `wails` 时，wails 会编入「未使用正确构建标签」的运行时报错弹窗，且桌面前端为空壳，窗口永远出不来。
 
+### 2.3 Linux（headless）
+
+仓库可直接构建**纯静态、无 GUI** 的 Linux 二进制，适合在 NAS / 服务器上常驻（例如打包成 fnOS 原生应用）：
+
+```bash
+./build-linux.sh            # 产物：dist/medreview-linux-amd64
+```
+
+- **ffmpeg 不内嵌**：Linux 构建不会嵌入 ffmpeg。把 `ffmpeg` / `ffprobe` 放到程序同目录的 `tools/ffmpeg/`（`findTool` 优先查这里），或安装到 PATH。
+- **RAW / HEIC**：这类格式依赖 ImageMagick 的 `magick`（放 PATH 即可）；没有也能跑，只是这些格式无法预览/检测。
+- **系统服务**：`packaging/linux/medreview.service` 是可直接改用的 systemd 模板（改路径、用户、素材目录即可）。
+- **硬件加速**：QC 解码的 `auto` 候选为 `cuda → qsv → vaapi`；`-qcdec` 也接受 `vaapi`（设备节点默认自动找 `/dev/dri/renderD128…131`，可用 `MEDREVIEW_VAAPI_DEVICE` 覆盖）。编码仍为 `nvenc` / `qsv` / CPU 三档，VAAPI 编码尚未接入。
+- **打开浏览器**：有桌面环境时用 `xdg-open`；无桌面（服务器）时忽略即可，地址会打印在日志里。
+
 ## 3. 架构与源码结构
 
 单进程 Go 服务 + 原生前端，无外部服务依赖（数据库为嵌入式 SQLite，通过纯 Go 驱动 `modernc.org/sqlite`）。
@@ -103,6 +117,8 @@ web/                 审阅页与下载页前端（go:embed 进二进制）
 ui/                  WebView2 本地控制台窗口界面（go:embed 进二进制）
 tools/               build_single.py（单文件化）、make_lnk.py（生成快捷方式）；tools/ffmpeg/ 为内嵌源（不入库）
 _verify/             验收脚本（见第 8 节）
+build-linux.sh       Linux headless 构建脚本
+packaging/linux/     systemd 服务模板
 ```
 
 前端改动后必须重新构建：`web/` 与 `ui/` 均在编译期嵌入二进制。
@@ -229,7 +245,8 @@ check_token_random.py      下载口令随机性、启动器不写死口令
 
 ## 10. 已知限制
 
-- 仅支持 Windows（ffmpeg 内嵌与快捷方式生成依赖 Windows）。
+- 官方分发目标为 Windows（ffmpeg 内嵌与快捷方式生成依赖 Windows）。
+- Linux 为自建 headless 形态（见 2.3）：无内嵌 ffmpeg、无桌面窗口，需自行提供 `tools/ffmpeg/`。
 - WebView2 版在部分环境会出现渲染进程崩溃循环；不稳定时请使用控制台版。
 - 转码缓存关闭程序时清空，下次启动需重新转码（`--vkeep` 可保留）。
 - 单实例使用同一端口；端口被占用时启动失败并给出提示。
@@ -346,6 +363,20 @@ go build -tags gui -ldflags "-H=windowsgui" -o medreview_ui.exe .
 
 > **Tag rule**: the wails build must include both `desktop` and `production`. With only `wails`, the binary embeds the "incorrect build tags" runtime error dialog and the desktop frontend is an empty shell — the window never appears.
 
+### 2.3 Linux (headless)
+
+The repository builds a **static, GUI-less** Linux binary, suitable for running on a NAS or server (for example, packaging it as a fnOS native app):
+
+```bash
+./build-linux.sh            # output: dist/medreview-linux-amd64
+```
+
+- **ffmpeg is not embedded** on Linux. Put `ffmpeg` / `ffprobe` next to the binary under `tools/ffmpeg/` (`findTool` checks there first), or install them in `PATH`.
+- **RAW / HEIC**: these formats need ImageMagick's `magick` (in `PATH`); without it the app still runs, those formats just cannot be previewed/checked.
+- **Service**: `packaging/linux/medreview.service` is a ready-to-adapt systemd unit (adjust paths, user, media root).
+- **Hardware acceleration**: QC decoding tries `cuda → qsv → vaapi` in `auto` mode; `-qcdec` also accepts `vaapi` (the device node is auto-detected at `/dev/dri/renderD128…131`, override with `MEDREVIEW_VAAPI_DEVICE`). Encoding still offers `nvenc` / `qsv` / CPU only; VAAPI encoding is not wired up yet.
+- **Browser**: `xdg-open` is used when a desktop session exists; on headless servers the address is printed to the log instead.
+
 ## 3. Architecture and source layout
 
 A single-process Go service with a native frontend, no external services (SQLite embedded via the pure-Go driver `modernc.org/sqlite`).
@@ -373,6 +404,8 @@ web/                 Review and download page frontends (go:embed into the binar
 ui/                  WebView2 desktop console UI (go:embed into the binary)
 tools/               build_single.py (single-file build), make_lnk.py (shortcut creation); tools/ffmpeg/ is the embed source (not tracked)
 _verify/             Acceptance scripts (see section 8)
+build-linux.sh       Linux headless build script
+packaging/linux/     systemd unit template
 ```
 
 Frontend changes require a rebuild: both `web/` and `ui/` are embedded at compile time.
@@ -499,7 +532,8 @@ There is also `go test -run 'TestSetRoot|TestSetToken|TestRebind'`, covering run
 
 ## 10. Known limitations
 
-- Windows only (embedded ffmpeg and shortcut creation are Windows-specific).
+- Windows is the official distribution target (embedded ffmpeg and shortcut creation are Windows-specific).
+- Linux is supported as a self-built headless binary (see 2.3): no embedded ffmpeg and no desktop window; provide `tools/ffmpeg/` yourself.
 - The WebView2 build may hit renderer crash loops in some environments; use the console build when unstable.
 - The transcode cache is cleared when the program exits; the next start transcodes again (`--vkeep` keeps it).
 - A single instance per port; if the port is taken, startup fails with a message.
