@@ -49,3 +49,5 @@ compare_qc.py
 # ---- 内嵌依赖：Linux 版 ffmpeg / ImageMagick（构建前自行放入）----
 tools/ffmpeg-linux/
 tools/imagemagick-linux/
+tools/ffmpeg-macos-arm64/
+tools/ffmpeg-macos-amd64/

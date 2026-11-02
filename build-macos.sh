@@ -14,6 +14,12 @@ mkdir -p "$OUTDIR"
 
 build() {
     local a="$1" out="$2"
+    local dir="tools/ffmpeg-macos-$a"
+    if [ ! -f "$dir/ffmpeg" ] || [ ! -f "$dir/ffprobe" ]; then
+        echo "missing: $dir/{ffmpeg,ffprobe}"
+        echo "put the macOS ($a) ffmpeg and ffprobe there first (see README 2.4)"
+        exit 1
+    fi
     CGO_ENABLED=0 GOOS=darwin GOARCH="$a" go build -trimpath -ldflags "-s -w" -o "$out" .
     echo "built: $out ($(du -h "$out" | cut -f1))"
 }
@@ -39,7 +45,7 @@ esac
 cat <<'NOTE'
 
 runtime notes:
-  - ffmpeg / ffprobe: put them next to the binary under tools/ffmpeg/, or `brew install ffmpeg`
+  - ffmpeg / ffprobe are embedded (extracted to ~/Library/Caches/medreview on first run)
   - ImageMagick (RAW/HEIC): `brew install imagemagick` (provides `magick`)
   - unsigned binary: first launch may be blocked by Gatekeeper. Allow it in
     System Settings > Privacy & Security, or run:
