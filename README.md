@@ -102,7 +102,8 @@ Go 原生支持 darwin，仓库可直接交叉编译（Apple Silicon / Intel 均
 ./build-macos.sh universal    # lipo 合并成通用二进制（需在 macOS 上执行）
 ```
 
-- **依赖**：`ffmpeg` / `ffprobe` 放到程序同目录的 `tools/ffmpeg/`，或 `brew install ffmpeg`；RAW / HEIC 需 `brew install imagemagick`（提供 `magick`）。
+- **内嵌 ffmpeg**：构建前把 macOS 版 `ffmpeg` / `ffprobe` 放进 `tools/ffmpeg-macos-arm64/` 或 `tools/ffmpeg-macos-amd64/`（按目标架构，均不入库）；运行时首次释放到 `~/Library/Caches/medreview/`。
+- **ImageMagick**：macOS 没有官方静态单文件版，**不内嵌**——`brew install imagemagick` 提供 `magick` 即可（用于 RAW / HEIC）。
 - **未签名**：首次启动会被 Gatekeeper 拦下，在「系统设置 → 隐私与安全性」里允许，或执行 `xattr -d com.apple.quarantine ./medreview`。
 - **硬件加速**：macOS 暂未接入（VideoToolbox 未支持），一律 CPU。
 - **无桌面窗口**：headless 形态，启动后从日志里取访问地址。
@@ -267,7 +268,7 @@ check_token_random.py      下载口令随机性、启动器不写死口令
 
 - 官方分发目标为 Windows（ffmpeg 内嵌与快捷方式生成依赖 Windows）。
 - Linux 为自建 headless 形态（见 2.3）：单文件版内嵌工具，精简版需自行提供 `tools/ffmpeg/`。
-- macOS 同为自建 headless（见 2.4）：无内嵌工具、无桌面窗口、无硬件加速。
+- macOS 同为自建 headless（见 2.4）：内嵌 ffmpeg（ImageMagick 需 brew），无桌面窗口、无硬件加速。
 - WebView2 版在部分环境会出现渲染进程崩溃循环；不稳定时请使用控制台版。
 - 转码缓存关闭程序时清空，下次启动需重新转码（`--vkeep` 可保留）。
 - 单实例使用同一端口；端口被占用时启动失败并给出提示。
@@ -410,7 +411,8 @@ Go supports darwin natively; the repository cross-compiles for both Apple Silico
 ./build-macos.sh universal    # lipo both into one universal binary (run on macOS)
 ```
 
-- **Dependencies**: put `ffmpeg` / `ffprobe` under `tools/ffmpeg/` next to the binary, or `brew install ffmpeg`; RAW / HEIC needs `brew install imagemagick` (provides `magick`).
+- **Embedded ffmpeg**: before building, put the macOS `ffmpeg` / `ffprobe` into `tools/ffmpeg-macos-arm64/` or `tools/ffmpeg-macos-amd64/` (matching the target arch; neither is tracked). First run extracts them to `~/Library/Caches/medreview/`.
+- **ImageMagick**: there is no official static single-file macOS build, so it is **not embedded** - `brew install imagemagick` provides `magick` for RAW / HEIC.
 - **Unsigned**: the first launch is blocked by Gatekeeper. Allow it in System Settings > Privacy & Security, or run `xattr -d com.apple.quarantine ./medreview`.
 - **Hardware acceleration**: not wired up for macOS (VideoToolbox unsupported); CPU only.
 - **No desktop window**: headless; read the address from the log.
@@ -575,7 +577,7 @@ There is also `go test -run 'TestSetRoot|TestSetToken|TestRebind'`, covering run
 
 - Windows is the official distribution target (embedded ffmpeg and shortcut creation are Windows-specific).
 - Linux is supported as a self-built headless binary (see 2.3): the single-file build embeds the tools, the slim build needs `tools/ffmpeg/` alongside.
-- macOS is also a self-built headless target (see 2.4): no embedded tools, no desktop window, CPU only.
+- macOS is also a self-built headless target (see 2.4): ffmpeg is embedded (ImageMagick via brew), no desktop window, CPU only.
 - The WebView2 build may hit renderer crash loops in some environments; use the console build when unstable.
 - The transcode cache is cleared when the program exits; the next start transcodes again (`--vkeep` keeps it).
 - A single instance per port; if the port is taken, startup fails with a message.
