@@ -19,6 +19,8 @@ import (
 	"sync"
 	"time"
 	"unicode"
+
+	"medreview/qc"
 )
 
 type Handler struct {
@@ -175,6 +177,46 @@ func (h *Handler) handleUsers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"users": users})
 }
 
+// handleQCThresholdsGet 读 QC 判定阈值：当前值 / 校准默认值 / 滑块规格（范围步长方向）。
+// 公开可读（与 /api/users 同级，读操作无副作用）。
+func (h *Handler) handleQCThresholdsGet(w http.ResponseWriter, r *http.Request) {
+	avail := h.qc != nil && h.qc.svc != nil && h.qc.svc.Available()
+	cur := qc.DefaultThresholds()
+	if h.qc != nil {
+		cur = h.qc.CurrentThresholds()
+	}
+	writeJSON(w, map[string]any{
+		"available": avail,
+		"current":   cur,
+		"defaults":  qc.DefaultThresholds(),
+		"specs":     qc.ThresholdSpecs(),
+	})
+}
+
+// handleQCThresholdsSet 应用新的判定阈值：生效 + 存 meta + 按新阈值全量重跑。
+// 改的是**全局**检测行为，与「换素材目录」同级敏感 → 只允许本机（requireLoopback）。
+func (h *Handler) handleQCThresholdsSet(w http.ResponseWriter, r *http.Request) {
+	if !requireLoopback(w, r) {
+		return
+	}
+	if h.qc == nil {
+		http.Error(w, "QC 未装配", http.StatusServiceUnavailable)
+		return
+	}
+	// 先落默认再覆盖：请求里缺的字段保持默认（而不是被钳到下限）
+	t := qc.DefaultThresholds()
+	if err := json.NewDecoder(r.Body).Decode(&t); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	n, err := h.qc.SetThresholds(t)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "requeued": n})
+}
+
 type Totals struct {
 	Files   int `json:"files"`
 	Keep    int `json:"keep"`
@@ -253,6 +295,8 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /api/folder", h.handleFolderInfo)
 	mux.HandleFunc("GET /api/files", h.handleFiles)
 	mux.HandleFunc("GET /api/qc/status", h.handleQCStatus)
+	mux.HandleFunc("GET /api/qc/thresholds", h.handleQCThresholdsGet)
+	mux.HandleFunc("POST /api/qc/thresholds", h.handleQCThresholdsSet)
 	mux.HandleFunc("POST /api/review", h.handleReview)
 	mux.HandleFunc("POST /api/review/batch", h.handleReviewBatch)
 	// 清空「本层」目录的全部标记（不含子目录）。与 /api/review/batch 分开是因为
@@ -1087,8 +1131,10 @@ func (h *Handler) handleFolderInfo(w http.ResponseWriter, r *http.Request) {
 	// 本层已标记数 / 其中本人标的数：给「清空本目录标记」的确认弹窗做预览。
 	// 只作用本层 → 用 folder_id 直查、不递归；markedMine 依赖 X-User。
 	marked, markedMine, _ := h.store.FolderMarkCounts(id, userOf(r))
+	// 本层「已完成审阅」（decision 1/2）——目录进度条专用。marked 口径含清除行，不能混用。
+	markedDone, _ := h.store.FolderDoneCount(id)
 	files, _ := h.store.FolderFileCount(id)
-	writeJSON(w, map[string]any{"folder": n, "marked": marked, "markedMine": markedMine, "files": files})
+	writeJSON(w, map[string]any{"folder": n, "marked": marked, "markedMine": markedMine, "markedDone": markedDone, "files": files})
 }
 
 // handleQCStatus 返回某目录「本层」质量自动检测的汇总计数（重复/损坏/空镜/镜头脏污）。

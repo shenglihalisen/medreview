@@ -82,7 +82,7 @@ html, body {
    那是横排 flex 会挤坏布局）。黑底上徽标用原浅色底 + 深字，对比足够。
    用户反馈还嫌小（2026-10-01）：字号 14→17、加厚内边距。 */
 #lb-qc { display: flex; gap: 10px; padding: 8px 16px 4px; flex-wrap: wrap; }
-#lb-qc .qc-lb { font-size: 17px; font-weight: 700; padding: 4px 14px; border-radius: 6px; color: #1a1a1a; }
+#lb-qc .qc-lb { font-size: 17px; font-weight: 700; padding: 4px 14px; border-radius: 6px; color: #1a1a1a; animation: qcBadgeIn .18s ease-out backwards; }
 #lb-qc .qc-lb.qc-dirt, #lb-qc .qc-lb.qc-noise { color: #fff !important; }
 .tree-row .tc {
   font-size: 11px;
@@ -133,6 +133,7 @@ html.is-phone .mode-badge { padding: 3px 9px; font-size: 11px; }
   border-right: 1px solid var(--border);
 }
 .seg button:last-child { border-right: 0; }
+.seg button { transition: background .15s, color .15s; }
 .seg button.on { background: var(--primary); color: #fff; }
 .seg button:hover:not(.on) { background: #f0f2f5; }
 label.mini { font-size: 12px; color: var(--text-dim); display: flex; align-items: center; gap: 5px; }
@@ -143,8 +144,10 @@ select, input[type=text] {
 .btn {
   border: 1px solid var(--border-strong); background: #fff; border-radius: 6px;
   padding: 5px 12px; cursor: pointer; font: inherit; font-size: 13px; color: var(--text);
+  transition: background .15s, color .15s, border-color .15s, transform .12s, filter .15s;
 }
 .btn:hover { background: #f0f2f5; }
+.btn:active { transform: scale(.97); }
 .btn.primary { background: var(--primary); border-color: var(--primary); color: #fff; }
 .btn.primary:hover { filter: brightness(1.08); }
 /* 未认领时给「认领此目录」加一层浅蓝底，让它在工具栏里跳出来（但不与「完成审阅」的实心蓝抢） */
@@ -187,7 +190,8 @@ select, input[type=text] {
   flex-direction: column;
   cursor: pointer;
 }
-.card:hover { border-color: var(--primary); }
+.card { transition: transform .15s ease-out, box-shadow .15s ease-out, border-color .15s ease-out; }
+.card:hover { border-color: var(--primary); transform: translateY(-2px); box-shadow: 0 4px 14px rgba(20,22,26,.10); }
 .card.keep { border-color: var(--keep); background: var(--keep-soft); }
 .card.reject { border-color: var(--reject); background: var(--reject-soft); }
 .card .thumb { flex: 1; background: #eceef1; position: relative; overflow: hidden; }
@@ -238,7 +242,7 @@ select, input[type=text] {
   display: none; flex-direction: column; align-items: flex-end; gap: 2px;
 }
 /* 用户反馈徽标太小看不清（2026-10-01）：字号 10→13、内边距加厚 */
-.qc-stack span { color: #1a1a1a; font-size: 13px; padding: 2px 8px; border-radius: 5px; font-weight: 700; }
+.qc-stack span { color: #1a1a1a; font-size: 13px; padding: 2px 8px; border-radius: 5px; font-weight: 700; animation: qcBadgeIn .18s ease-out backwards; }
 .qc-dup { background: #ffd54a; }
 .qc-corrupt { background: #ff9d3a; }
 .qc-blank { background: #ffe08a; }
@@ -248,6 +252,40 @@ select, input[type=text] {
 .qc-exposure { background: #4fd1e0; }
 .qc-noise { background: #9aa0b5; color: #fff !important; }
 .qc-shake { background: #7fe3a8; }
+
+/* QC 判定阈值调节弹窗（检测算法零改动，只调"是/否"判定线） */
+.th-row { display: flex; align-items: center; gap: 8px; padding: 7px 0; border-bottom: 1px dashed var(--border-strong); }
+.th-row:last-of-type { border-bottom: 0; }
+.th-row .th-name { width: 46px; flex-shrink: 0; font-weight: 600; font-size: 13px; cursor: help; }
+.th-row input[type="range"] { flex: 1; min-width: 0; }
+.th-row input[type="number"] { width: 72px; flex-shrink: 0; }
+.th-row .th-dir { width: 88px; flex-shrink: 0; font-size: 11px; color: var(--text-dim); text-align: right; }
+.th-row .th-reset { flex-shrink: 0; font-size: 12px; padding: 3px 8px; }
+
+/* ---------- 动效基建（keyframes / 骨架屏 / stagger / 进度条） ----------
+   红线：只动 transform/opacity（合成层）；微交互 120-200ms；reduced-motion 全禁。 */
+@keyframes qcBadgeIn { from { opacity: 0; transform: scale(.8); } }
+@keyframes lbFadeIn { from { opacity: 0; } }
+@keyframes cardIn { from { opacity: 0; transform: translateY(6px); } }
+.card.card-in { animation: cardIn .2s ease-out backwards; }
+.skel-card { position: absolute; border-radius: 10px; background: #eef0f3; overflow: hidden; }
+.skel-card::after { content: ""; position: absolute; top: 0; bottom: 0; left: -50%; width: 200%; transform: translateX(-25%); background: linear-gradient(90deg, transparent, rgba(255,255,255,.7), transparent); animation: skelSweep 1.2s linear infinite; }
+@keyframes skelSweep { to { transform: translateX(25%); } }
+.th-prog-bar { height: 8px; border-radius: 4px; background: #eef0f3; overflow: hidden; margin: 10px 0 6px; }
+.th-prog-fill { height: 100%; width: 100%; background: var(--primary); transform-origin: 0 50%; transform: scaleX(0); transition: transform .25s ease-out; }
+.th-prog-num { font-size: 13px; font-weight: 600; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+}
+
+/* ---------- 审阅进度条：①侧栏全局（已完成审阅/全部总数）②工具栏下本层（目录内） ---------- */
+#tree-prog { padding: 10px 12px 8px; border-bottom: 1px solid var(--border); }
+#tree-prog .prog-label { display: block; margin-bottom: 5px; }
+#folder-prog { display: flex; align-items: center; gap: 10px; padding: 6px 12px 2px; }
+#folder-prog .prog-track { min-width: 120px; }
+.prog-label { font-size: 12px; color: var(--text-dim); }
+.prog-track { height: 6px; border-radius: 3px; background: #e8eaee; overflow: hidden; flex: 1; }
+.prog-fill { height: 100%; width: 100%; border-radius: 3px; background: var(--primary); transform-origin: 0 50%; transform: scaleX(0); transition: transform .25s ease-out; }
 #empty { padding: 60px 0; text-align: center; color: var(--text-faint); }
 
 /* ---------- 灯箱 ---------- */
@@ -266,6 +304,7 @@ select, input[type=text] {
 .lb-body { flex: 1; display: flex; align-items: center; justify-content: center; overflow: hidden; padding: 0 96px; position: relative; }
 .lb-body img {
   max-width: 100%; max-height: 100%; object-fit: contain;
+  animation: lbFadeIn .16s ease-out;
   transform-origin: center center; will-change: transform;
   /* 单指拖动只在放大后生效，交给 JS 处理，别让浏览器抢去滚动/缩放 */
   touch-action: none;
@@ -361,9 +400,10 @@ html.is-phone .lb-guides-panel { right: 8px; top: 50px; min-width: 124px; }
 .lb-pager #lb-orig { width: auto; padding: 0 14px; font-size: 13px; white-space: nowrap; }
 
 /* ---------- 弹窗 ---------- */
-#modal { position: fixed; inset: 0; background: rgba(20,22,26,.5); display: none; z-index: 200; align-items: center; justify-content: center; }
-#modal.on { display: flex; }
-.modal-box { background: #fff; border-radius: 10px; width: 620px; max-width: 92vw; max-height: 84vh; display: flex; flex-direction: column; overflow: hidden; }
+#modal { position: fixed; inset: 0; background: rgba(20,22,26,.5); display: flex; z-index: 200; align-items: center; justify-content: center; opacity: 0; visibility: hidden; transition: opacity .15s ease-out, visibility .15s; }
+#modal.on { opacity: 1; visibility: visible; transition: opacity .18s ease-out, visibility .18s; }
+.modal-box { background: #fff; border-radius: 10px; width: 620px; max-width: 92vw; max-height: 84vh; display: flex; flex-direction: column; overflow: hidden; transform: translateY(8px) scale(.96); transition: transform .15s ease-out; }
+#modal.on .modal-box { transform: translateY(0) scale(1); transition: transform .18s cubic-bezier(.2,.8,.3,1); }
 .modal-head { padding: 14px 18px; border-bottom: 1px solid var(--border); font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
 .modal-body { padding: 14px 18px; overflow: auto; flex: 1; }
 .modal-foot { padding: 12px 18px; border-top: 1px solid var(--border); display: flex; gap: 8px; justify-content: flex-end; }
@@ -374,19 +414,21 @@ html.is-phone .lb-guides-panel { right: 8px; top: 50px; min-width: 124px; }
 .hint { color: var(--text-dim); font-size: 12px; line-height: 1.7; }
 kbd { background: #f0f2f5; border: 1px solid var(--border-strong); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; font: 12px/1.6 Consolas, monospace; }
 .toast {
-  position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%);
+  position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%) translateY(6px);
   background: rgba(20,22,26,.9); color: #fff; padding: 8px 18px; border-radius: 18px;
-  font-size: 13px; z-index: 300; opacity: 0; transition: opacity .2s; pointer-events: none;
+  font-size: 13px; z-index: 300; opacity: 0; transition: opacity .2s, transform .2s; pointer-events: none;
 }
-.toast.on { opacity: 1; }
+.toast.on { opacity: 1; transform: translateX(-50%) translateY(0); }
 
 /* ---------- 名字门禁（网页内弹窗，替代原生 prompt） ---------- */
 #name-gate {
-  position: fixed; inset: 0; background: rgba(20,22,26,.5); display: none;
+  position: fixed; inset: 0; background: rgba(20,22,26,.5); display: flex;
+  opacity: 0; visibility: hidden; transition: opacity .15s ease-out, visibility .15s;
   z-index: 400; align-items: center; justify-content: center;
 }
-#name-gate.on { display: flex; }
-.ng-box { background: #fff; border-radius: 10px; width: 420px; max-width: 92vw; padding: 22px 24px; box-shadow: 0 8px 30px rgba(0,0,0,.2); }
+#name-gate.on { opacity: 1; visibility: visible; transition: opacity .18s ease-out, visibility .18s; }
+.ng-box { background: #fff; border-radius: 10px; width: 420px; max-width: 92vw; padding: 22px 24px; box-shadow: 0 8px 30px rgba(0,0,0,.2); transform: translateY(8px) scale(.96); transition: transform .15s ease-out; }
+#name-gate.on .ng-box { transform: translateY(0) scale(1); transition: transform .18s cubic-bezier(.2,.8,.3,1); }
 .ng-box h3 { margin: 0 0 6px; font-size: 17px; }
 .ng-box .sub { margin: 0 0 16px; color: var(--text-dim); font-size: 12.5px; line-height: 1.6; }
 .ng-row { display: flex; gap: 8px; margin-bottom: 16px; }
@@ -949,6 +991,34 @@ html.is-phone #name-ok { min-height: 44px; }
     f.onchange = function () { S.filter = f.value; reload(); };
     $("slot-filter").appendChild(f);
 
+    // QC 判定阈值调节入口：点开弹窗拖滑块（应用后按新阈值全量重跑，见 /api/qc/thresholds）
+    var thBtn = document.createElement("button");
+    thBtn.className = "btn";
+    thBtn.id = "btn-qc-th";
+    thBtn.textContent = "调阈值";
+    thBtn.title = "调节 QC 判定阈值（检测算法不变；应用后重新检测全部文件，仅限本机操作）";
+    thBtn.onclick = openThresholdModal;
+    $("slot-filter").appendChild(thBtn);
+
+    // 审阅进度条：①侧栏全局（已完成审阅/全部总数）②工具栏下本层（目录内）。
+    // JS 建节点免改 HTML；数据分别来自 /api/status 的 totals 与 /api/folder 的 marked/files。
+    var treeEl = $("tree");
+    if (treeEl && !document.getElementById("tree-prog")) {
+      var tp = document.createElement("div");
+      tp.id = "tree-prog";
+      tp.innerHTML = '<span class="prog-label" id="tree-prog-label">—</span>' +
+        '<div class="prog-track"><div class="prog-fill" id="tree-prog-fill"></div></div>';
+      treeEl.parentNode.insertBefore(tp, treeEl);
+    }
+    var toolbarEl = $("toolbar");
+    if (toolbarEl && !document.getElementById("folder-prog")) {
+      var fp = document.createElement("div");
+      fp.id = "folder-prog";
+      fp.innerHTML = '<span class="prog-label" id="folder-prog-label">本层 —</span>' +
+        '<div class="prog-track"><div class="prog-fill" id="folder-prog-fill"></div></div>';
+      toolbarEl.insertAdjacentElement("afterend", fp);
+    }
+
     var who = $("who");
     if (who) who.textContent = "当前用户: " + S.user;
     updateStat();
@@ -957,6 +1027,203 @@ html.is-phone #name-ok { min-height: 44px; }
     updateQualityBtn();
     if (S.mode === "download" && el.dlBar) el.dlBar.style.display = "flex";
     if (el.finishBtn) el.finishBtn.onclick = finishReview;
+  }
+
+  // ---------- QC 判定阈值调节（检测算法零改动，只调"是/否"那条线） ----------
+  // 行定义：[key, 中文名, 一句白话(悬停提示), 方向]。范围/步长来自后端 specs（单一事实源）。
+  var TH_ROWS = [
+    ["blurLapStd", "模糊", "画面越糊越容易判模糊（指标：拉普拉斯标准差）", "调大→更严"],
+    ["noiseFloor", "噪点", "噪点越重越容易判噪点（指标：平坦区噪声底线）", "调大→更宽松"],
+    ["blankStd", "空镜", "画面越单调越容易判空镜（指标：灰度标准差）", "调大→更严"],
+    ["expUnder", "欠曝", "画面整体越暗越容易判欠曝", "调大→更严"],
+    ["expOver", "过曝", "画面整体越亮越容易判过曝", "调大→更宽松"],
+    ["shakeRms", "抖动", "帧间晃动越大越容易判抖动", "调大→更宽松"],
+    ["dupSim", "重复", "两张相似度高于此值判重复（如 0.9 = 90% 相似就算）", "调大→更严"]
+  ];
+
+  var thProg = null; // 阈值重跑进度态 {total,done,num,fill}；null = 没有正在展示的进度
+
+  function openThresholdModal() {
+    api("/api/qc/thresholds").then(function (d) {
+      if (!d.available) { toast("QC 不可用（缺 ffmpeg），无法调阈值"); return; }
+      showThresholdModal(d);
+    }).catch(function (e) { toast("读取阈值失败: " + e.message + netHint(e)); });
+  }
+
+  function showThresholdModal(d) {
+    var specs = d.specs || {};
+    var defaults = d.defaults || {};
+    var draft = {};
+    TH_ROWS.forEach(function (row) {
+      var v = Number(d.current[row[0]]);
+      if (!isFinite(v)) v = Number(defaults[row[0]]);
+      draft[row[0]] = v;
+    });
+    el.modalTitle.textContent = "调节 QC 判定阈值";
+    el.modalBody.innerHTML = "";
+
+    var hint = document.createElement("div");
+    hint.className = "hint";
+    hint.style.fontSize = "12.5px";
+    hint.style.marginBottom = "6px";
+    hint.textContent = "只调「是/否」判定线，检测算法不变。默认值经实拍校准（宁漏勿滥）；应用后按新阈值重新检测全部文件。";
+    el.modalBody.appendChild(hint);
+
+    var rows = {};
+    TH_ROWS.forEach(function (row) {
+      var key = row[0], sp = specs[key] || {};
+      var line = document.createElement("div");
+      line.className = "th-row";
+      var name = document.createElement("span");
+      name.className = "th-name";
+      name.textContent = row[1];
+      name.title = row[2];
+      var rng = document.createElement("input");
+      rng.type = "range";
+      rng.min = sp.min; rng.max = sp.max; rng.step = sp.step;
+      rng.value = draft[key];
+      var num = document.createElement("input");
+      num.type = "number";
+      num.min = sp.min; num.max = sp.max; num.step = sp.step;
+      num.value = draft[key];
+      var dir = document.createElement("span");
+      dir.className = "th-dir";
+      dir.textContent = row[3];
+      var reset = document.createElement("button");
+      reset.className = "btn th-reset";
+      reset.textContent = "默认";
+      reset.title = "恢复校准默认值 " + defaults[key];
+      reset.onclick = function () {
+        rng.value = defaults[key];
+        num.value = defaults[key];
+        draft[key] = Number(defaults[key]);
+      };
+      rng.oninput = function () { num.value = rng.value; draft[key] = Number(rng.value); };
+      num.onchange = function () {
+        var v = Number(num.value);
+        if (!isFinite(v)) v = draft[key];
+        if (v < sp.min) v = sp.min;
+        if (v > sp.max) v = sp.max;
+        num.value = v;
+        rng.value = v;
+        draft[key] = v;
+      };
+      line.appendChild(name);
+      line.appendChild(rng);
+      line.appendChild(num);
+      line.appendChild(dir);
+      line.appendChild(reset);
+      el.modalBody.appendChild(line);
+      rows[key] = { rng: rng, num: num };
+    });
+
+    var foot = document.createElement("div");
+    foot.className = "modal-foot";
+    var cancel = document.createElement("button");
+    cancel.className = "btn";
+    cancel.textContent = "取消";
+    cancel.onclick = closeModal;
+    var resetAll = document.createElement("button");
+    resetAll.className = "btn";
+    resetAll.textContent = "全部恢复默认";
+    resetAll.onclick = function () {
+      TH_ROWS.forEach(function (row) {
+        rows[row[0]].rng.value = defaults[row[0]];
+        rows[row[0]].num.value = defaults[row[0]];
+        draft[row[0]] = Number(defaults[row[0]]);
+      });
+    };
+    var apply = document.createElement("button");
+    apply.className = "btn primary";
+    apply.textContent = "应用并重新检测";
+    apply.onclick = function () {
+      var body = {};
+      TH_ROWS.forEach(function (row) { body[row[0]] = draft[row[0]]; });
+      apply.disabled = true;
+      api("/api/qc/thresholds", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      }).then(function (res) {
+        if (!res.requeued) { closeModal(); toast("阈值未变化，无需重新检测"); return; }
+        showThresholdProgress(res.requeued);
+      }).catch(function (e) {
+        apply.disabled = false;
+        var m = (e && e.message) || "";
+        if (/loopback|127\.0\.0\.1|403/i.test(m)) toast("调阈值只允许在本机（127.0.0.1）操作");
+        else toast("应用失败: " + m + netHint(e));
+      });
+    };
+    foot.appendChild(cancel);
+    foot.appendChild(resetAll);
+    foot.appendChild(apply);
+    el.modalBody.appendChild(foot);
+    el.modal.classList.add("on");
+  }
+
+  // 应用后：弹窗切换成进度态（SSE 每广播一张的 qc 事件计一次数），跑完自动关。
+  // 用户可点「后台运行」提前关闭——后台继续跑，徽标仍会就地刷新。
+  function showThresholdProgress(total) {
+    el.modalTitle.textContent = "正在按新阈值重新检测";
+    el.modalBody.innerHTML = "";
+    var num = document.createElement("div");
+    num.className = "th-prog-num";
+    num.textContent = "0 / " + total;
+    var bar = document.createElement("div");
+    bar.className = "th-prog-bar";
+    var fill = document.createElement("div");
+    fill.className = "th-prog-fill";
+    bar.appendChild(fill);
+    var hint = document.createElement("div");
+    hint.className = "hint";
+    hint.style.fontSize = "12.5px";
+    hint.textContent = "可以点「后台运行」先回去审阅，跑完徽标自动刷新。视频多时会慢一些。";
+    el.modalBody.appendChild(num);
+    el.modalBody.appendChild(bar);
+    el.modalBody.appendChild(hint);
+    var foot = document.createElement("div");
+    foot.className = "modal-foot";
+    var bg = document.createElement("button");
+    bg.className = "btn";
+    bg.textContent = "后台运行";
+    bg.onclick = function () { thProg = null; closeModal(); toast("重新检测转入后台，完成后徽标自动刷新"); };
+    foot.appendChild(bg);
+    el.modalBody.appendChild(foot);
+    thProg = { total: total, done: 0, num: num, fill: fill };
+    updateThresholdProgress();
+    el.modal.classList.add("on");
+  }
+
+  function updateThresholdProgress() {
+    if (!thProg) return;
+    thProg.num.textContent = thProg.done + " / " + thProg.total;
+    thProg.fill.style.transform = "scaleX(" + (thProg.total ? thProg.done / thProg.total : 0) + ")";
+    if (thProg.done >= thProg.total) {
+      var t = thProg.total;
+      thProg = null;
+      toast("QC 重新检测完成（" + t + " 个），徽标已更新");
+      setTimeout(function () { closeModal(); }, 600);
+    }
+  }
+
+  // ---------- 骨架屏（拉数据空窗期占位；sweep 用 transform，遵守动效红线） ----------
+  function showSkeleton() {
+    if (document.querySelector(".skel-card")) return;
+    var cols = S.cols || 4, colW = S.colW || 220, gap = S.gap || 10;
+    var cellH = S.cellH || 200, rowH = S.rowH || (cellH + gap);
+    for (var i = 0; i < 8; i++) {
+      var d = document.createElement("div");
+      d.className = "skel-card";
+      d.style.left = (i % cols) * (colW + gap) + "px";
+      d.style.top = Math.floor(i / cols) * (rowH + gap) + "px";
+      d.style.width = colW + "px";
+      d.style.height = cellH + "px";
+      el.grid.appendChild(d);
+    }
+  }
+  function removeSkeleton() {
+    var sk = document.querySelectorAll(".skel-card");
+    for (var i = 0; i < sk.length; i++) sk[i].remove();
   }
 
   function setCols(c) {
@@ -1099,6 +1366,9 @@ html.is-phone #name-ok { min-height: 44px; }
       S.folderRel = n.relPath;
       S.selfTotal = n.selfTotal || 0;
       S.pending = n.pending || 0;
+      S.folderMarked = (d.markedDone != null ? d.markedDone : d.marked) || 0; // 本层已审（decision 1/2；marked 含清除行，不能画进度）
+      S.folderFiles = d.files || 0;   // 本层文件总数
+      updateFolderBar();
       S.claimedBy = n.claimedBy || "";
       el.crumb.textContent = n.name;
       el.crumb.title = n.relPath;
@@ -1184,6 +1454,10 @@ html.is-phone #name-ok { min-height: 44px; }
     clearPool();
     el.grid.style.height = "0px";
     render();
+    // 新数据到达的第一窗播 stagger 进场；拉数据的空窗给骨架屏（滚动补窗两者都不参与）。
+    S.enterFresh = true;
+    showSkeleton();
+    refreshFolderSoon(); // 换目录/重载后对账两条进度条（本层 + 全局）
     return loadMore();
   }
 
@@ -1212,21 +1486,25 @@ html.is-phone #name-ok { min-height: 44px; }
   }
 
   // 质量自动检测（QC）位掩码：bit0=重复 bit1=损坏 bit2=空镜 bit3=镜头脏污
-  // bit4=模糊 bit5=曝光 bit6=噪点
+  // bit4=模糊 bit5=曝光 bit6=噪点 bit7=抖动
+  // 徽标文字后附带估算值（如 模糊0.83），值取自后端 QCInfo 的 *Conf / expMean / shakeAmp，仅提示用。
+  function qcNum(v) {
+    return (typeof v === "number" && !isNaN(v)) ? v.toFixed(2) : "";
+  }
   function qcFlagList(qc) {
     if (!qc || !qc.flags) return [];
     var out = [];
-    if (qc.flags & 1) out.push(["重复", "qc-dup"]);
-    if (qc.flags & 2) out.push(["损坏", "qc-corrupt"]);
-    if (qc.flags & 4) out.push(["空镜", "qc-blank"]);
-    if (qc.flags & 8) out.push(["脏污", "qc-dirt"]);
-    if (qc.flags & 16) out.push(["模糊", "qc-blur"]);
-    // 曝光单独显示方向（欠曝/过曝），比笼统的"曝光"有用
+    if (qc.flags & 1) out.push(["重复", "qc-dup", ""]);
+    if (qc.flags & 2) out.push(["损坏", "qc-corrupt", ""]);
+    if (qc.flags & 4) out.push(["空镜", "qc-blank", qcNum(qc.blankConf)]);
+    if (qc.flags & 8) out.push(["脏污", "qc-dirt", qcNum(qc.dirtConf)]);
+    if (qc.flags & 16) out.push(["模糊", "qc-blur", qcNum(qc.blurConf)]);
+    // 曝光单独显示方向（欠曝/过曝），比笼统的"曝光"有用；值用平均亮度
     if (qc.flags & 32) {
-      out.push([qc.expOver ? "过曝" : qc.expUnder ? "欠曝" : "曝光", "qc-exposure"]);
+      out.push([qc.expOver ? "过曝" : qc.expUnder ? "欠曝" : "曝光", "qc-exposure", qcNum(qc.expMean)]);
     }
-    if (qc.flags & 64) out.push(["噪点", "qc-noise"]);
-    if (qc.flags & 128) out.push(["抖动", "qc-shake"]);
+    if (qc.flags & 64) out.push(["噪点", "qc-noise", qcNum(qc.noiseConf)]);
+    if (qc.flags & 128) out.push(["抖动", "qc-shake", qcNum(qc.shakeAmp)]);
     return out;
   }
 
@@ -1242,7 +1520,7 @@ html.is-phone #name-ok { min-height: 44px; }
     }
     stack.innerHTML = "";
     qcFlagList(f.qc).forEach(function (p) {
-      stack.appendChild(mkBadge(p[0], p[1]));
+      stack.appendChild(mkBadge(p[0] + (p[2] || ""), p[1]));
     });
     stack.style.display = stack.children.length ? "flex" : "none";
   }
@@ -1273,12 +1551,14 @@ html.is-phone #name-ok { min-height: 44px; }
       }
       if (own.length < S.page) S.hasMore = false;
       S.loading = false;
+      removeSkeleton(); // 数据已到（含空目录）：骨架使命结束，别让它卡在空目录页
       updateStat();
       measure();
       render();
       return arr;
     }).catch(function (e) {
       S.loading = false;
+      removeSkeleton();
       toast("加载文件失败: " + e.message + netHint(e));
     });
   }
@@ -1310,6 +1590,14 @@ html.is-phone #name-ok { min-height: 44px; }
   }
 
   function render() {
+    // 骨架屏退场：真实数据一到就撤（空数据时也会跑到这里，那时骨架保留）。
+    // stagger 只在"新数据到达后的第一窗"播一次：滚动补窗不播，避免刷屏闪烁。
+    var fresh = false;
+    if (S.items.length) {
+      removeSkeleton();
+      fresh = S.enterFresh;
+      S.enterFresh = false;
+    }
     var total = S.items.length;
     var rows = Math.ceil(total / S.cols);
     el.grid.style.height = Math.max(0, rows * S.rowH - S.gap) + "px";
@@ -1335,10 +1623,16 @@ html.is-phone #name-ok { min-height: 44px; }
       if (!need.has(idx)) { hoverPreview(node, false); node.remove(); S.pool.delete(idx); }
     });
 
+    var freshIdx = 0;
     for (var j = start; j < end; j++) {
       var node = S.pool.get(j);
       if (!node) {
         node = createCard(S.items[j], j);
+        if (fresh) {
+          node.classList.add("card-in");
+          node.style.animationDelay = Math.min(freshIdx, 8) * 20 + "ms";
+          freshIdx++;
+        }
         S.pool.set(j, node);
         el.grid.appendChild(node);
       }
@@ -1580,7 +1874,18 @@ html.is-phone #name-ok { min-height: 44px; }
 
   function applyLocal(id, decision) {
     var f = S.byId[id];
+    var prev = f ? f.decision : null;
     if (f) f.decision = decision;
+    // 本层进度条即时跳动：本层文件的决策变化先本地加减一（父目录文件不计入本层），
+    // 随后 refreshFolderSoon 用服务端权威计数校正（覆盖别人的标记 / 清空 / 口径差异）。
+    if (f && !f.fromParent && prev !== decision) {
+      var was = (prev === 1 || prev === 2) ? 1 : 0;
+      var now = (decision === 1 || decision === 2) ? 1 : 0;
+      if (was !== now) {
+        S.folderMarked = Math.max(0, (S.folderMarked || 0) + (now - was));
+        updateFolderBar();
+      }
+    }
     // 「完成审阅」的临时列表是另一批对象，同样要更新，否则灯箱里三个按钮的高亮不跟着变
     if (S.lbOverride) {
       S.lbOverride.forEach(function (x) { if (String(x.id) === String(id)) x.decision = decision; });
@@ -1596,6 +1901,7 @@ html.is-phone #name-ok { min-height: 44px; }
       }
     });
     updateStat();
+    refreshFolderSoon(); // 去抖：全局条 + 本层条一起用服务端口径对账
     var cur = lbList()[S.lbIndex];
     if (S.lbIndex >= 0 && cur && cur.id === id) updateLbButtons();
   }
@@ -1609,7 +1915,51 @@ html.is-phone #name-ok { min-height: 44px; }
     el.stat.textContent = (S.user ? S.user + " · " : "") + txt;
   }
 
+  // 两条进度条的服务端对账（去抖 120ms，多次标记合并成一次）：
+  // ①全局条 → /api/status 的 totals（服务端 1s 记忆，很便宜）；②本层条 → /api/folder 的 marked/files。
+  // 本地即时跳动由 applyLocal 负责，这里负责校正（别人的标记 / 清空 / 分页口径差异）。
+  function refreshFolderSoon() {
+    clearTimeout(S.folderProgTimer);
+    S.folderProgTimer = setTimeout(function () {
+      api("/api/status").then(function (st) {
+        S.totals = st.totals || null;
+        updateTreeBar();
+      }).catch(function () {});
+      if (!S.folderId) return;
+      api("/api/folder?folder=" + S.folderId).then(function (d) {
+        S.folderMarked = (d.markedDone != null ? d.markedDone : d.marked) || 0;
+        S.folderFiles = d.files || 0;
+        updateFolderBar();
+      }).catch(function () {});
+    }, 120);
+  }
+
+  // 侧栏全局进度条：已完成审阅（保留+不保留）/ 全部总数。数据 = /api/status 的 totals。
+  function updateTreeBar() {
+    var fill = document.getElementById("tree-prog-fill");
+    var label = document.getElementById("tree-prog-label");
+    if (!fill || !label) return;
+    var t = S.totals;
+    if (!t || !t.files) { label.textContent = "全部已完成审阅 0 / 0"; fill.style.transform = "scaleX(0)"; return; }
+    var done = (t.keep || 0) + (t.reject || 0);
+    var pct = Math.round(done / t.files * 100);
+    label.textContent = "全部已完成审阅 " + done + " / " + t.files + "（" + pct + "%）";
+    fill.style.transform = "scaleX(" + (done / t.files) + ")";
+  }
+
+  // 本层进度条：只算当前目录直属文件的 已标记/总数。
+  function updateFolderBar() {
+    var fill = document.getElementById("folder-prog-fill");
+    var label = document.getElementById("folder-prog-label");
+    if (!fill || !label) return;
+    var total = S.folderFiles || 0, done = S.folderMarked || 0;
+    var pct = total ? Math.round(done / total * 100) : 0;
+    label.textContent = "本层已审 " + done + " / " + total + "（" + pct + "%）";
+    fill.style.transform = "scaleX(" + (total ? done / total : 0) + ")";
+  }
+
   function refreshTreeSoon() {
+    refreshFolderSoon(); // 标记变更的 SSE 都会路过这里：顺带去抖对账本层进度条
     clearTimeout(S.refreshTimer);
     S.refreshTimer = setTimeout(function () {
       loadTree(0).then(function () {
@@ -2024,7 +2374,7 @@ html.is-phone #name-ok { min-height: 44px; }
       flags.forEach(function (it) {
         var b = document.createElement("span");
         b.className = "qc-lb " + it[1];
-        b.textContent = it[0];
+        b.textContent = it[0] + (it[2] || "");
         bar.appendChild(b);
       });
       el.lbBody.parentNode.insertBefore(bar, el.lbBody);
@@ -2668,6 +3018,10 @@ html.is-phone #name-ok { min-height: 44px; }
   function clearLocalItems() {
     S.items.forEach(function (f) { applyLocal(f.id, 0); });
     updateStat();
+    // 整个目录被清空：本层已标记直接归零（未载入的分页文件也算），再去抖对账。
+    S.folderMarked = 0;
+    updateFolderBar();
+    refreshFolderSoon();
   }
 
   // 服务端给的路径是本机绝对路径（素材根目录、导出目标目录）。
@@ -2897,6 +3251,8 @@ html.is-phone #name-ok { min-height: 44px; }
   function loadStatus() {
     return api("/api/status").then(function (st) {
       S.canDownload = !!st.canDownload;
+      S.totals = st.totals || null; // 全库口径（与仪表盘同一份 totalsSnapshot）
+      updateTreeBar();
       S.folderRel = st.root || "";
       if (st.root) el.crumb.textContent = st.root.split(/[\\/]/).pop() || st.root;
       el.crumb.title = st.root || "未设置";
@@ -2970,6 +3326,8 @@ html.is-phone #name-ok { min-height: 44px; }
         // 灯箱正好开在它上面时同步重画脏点框。不改 decision，纯辅助提示。
         var qf = d.data;
         if (!qf || qf.fileId == null) return;
+        // 阈值重跑进度：每广播一张的 qc 事件计一次（进度弹窗开着才有效）。
+        if (thProg) { thProg.done = Math.min(thProg.total, thProg.done + 1); updateThresholdProgress(); }
         var it = S.byId[qf.fileId];
         if (!it) return;
         it.qc = qf.qc;

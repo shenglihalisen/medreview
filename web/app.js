@@ -437,6 +437,34 @@
     f.onchange = function () { S.filter = f.value; reload(); };
     $("slot-filter").appendChild(f);
 
+    // QC 判定阈值调节入口：点开弹窗拖滑块（应用后按新阈值全量重跑，见 /api/qc/thresholds）
+    var thBtn = document.createElement("button");
+    thBtn.className = "btn";
+    thBtn.id = "btn-qc-th";
+    thBtn.textContent = "调阈值";
+    thBtn.title = "调节 QC 判定阈值（检测算法不变；应用后重新检测全部文件，仅限本机操作）";
+    thBtn.onclick = openThresholdModal;
+    $("slot-filter").appendChild(thBtn);
+
+    // 审阅进度条：①侧栏全局（已完成审阅/全部总数）②工具栏下本层（目录内）。
+    // JS 建节点免改三份 HTML；数据分别来自 /api/status 的 totals 与 /api/folder 的 marked/files。
+    var treeEl = $("tree");
+    if (treeEl && !document.getElementById("tree-prog")) {
+      var tp = document.createElement("div");
+      tp.id = "tree-prog";
+      tp.innerHTML = '<span class="prog-label" id="tree-prog-label">—</span>' +
+        '<div class="prog-track"><div class="prog-fill" id="tree-prog-fill"></div></div>';
+      treeEl.parentNode.insertBefore(tp, treeEl);
+    }
+    var toolbarEl = $("toolbar");
+    if (toolbarEl && !document.getElementById("folder-prog")) {
+      var fp = document.createElement("div");
+      fp.id = "folder-prog";
+      fp.innerHTML = '<span class="prog-label" id="folder-prog-label">本层 —</span>' +
+        '<div class="prog-track"><div class="prog-fill" id="folder-prog-fill"></div></div>';
+      toolbarEl.insertAdjacentElement("afterend", fp);
+    }
+
     var who = $("who");
     if (who) who.textContent = "当前用户: " + S.user;
     updateStat();
@@ -592,6 +620,9 @@
       S.folderRel = n.relPath;
       S.selfTotal = n.selfTotal || 0;
       S.pending = n.pending || 0;
+      S.folderMarked = (d.markedDone != null ? d.markedDone : d.marked) || 0; // 本层已审（decision 1/2；marked 含清除行，不能画进度）
+      S.folderFiles = d.files || 0;   // 本层文件总数
+      updateFolderBar();
       S.claimedBy = n.claimedBy || "";
       el.crumb.textContent = n.name;
       el.crumb.title = n.relPath;
@@ -677,6 +708,10 @@
     clearPool();
     el.grid.style.height = "0px";
     render();
+    // 新数据到达的第一窗播 stagger 进场；拉数据的空窗给骨架屏（滚动补窗两者都不参与）。
+    S.enterFresh = true;
+    showSkeleton();
+    refreshFolderSoon(); // 换目录/重载后对账两条进度条（本层 + 全局）
     return loadMore();
   }
 
@@ -705,21 +740,25 @@
   }
 
   // 质量自动检测（QC）位掩码：bit0=重复 bit1=损坏 bit2=空镜 bit3=镜头脏污
-  // bit4=模糊 bit5=曝光 bit6=噪点
+  // bit4=模糊 bit5=曝光 bit6=噪点 bit7=抖动
+  // 徽标文字后附带估算值（如 模糊0.83），值取自后端 QCInfo 的 *Conf / expMean / shakeAmp，仅提示用。
+  function qcNum(v) {
+    return (typeof v === "number" && !isNaN(v)) ? v.toFixed(2) : "";
+  }
   function qcFlagList(qc) {
     if (!qc || !qc.flags) return [];
     var out = [];
-    if (qc.flags & 1) out.push(["重复", "qc-dup"]);
-    if (qc.flags & 2) out.push(["损坏", "qc-corrupt"]);
-    if (qc.flags & 4) out.push(["空镜", "qc-blank"]);
-    if (qc.flags & 8) out.push(["脏污", "qc-dirt"]);
-    if (qc.flags & 16) out.push(["模糊", "qc-blur"]);
-    // 曝光单独显示方向（欠曝/过曝），比笼统的"曝光"有用
+    if (qc.flags & 1) out.push(["重复", "qc-dup", ""]);
+    if (qc.flags & 2) out.push(["损坏", "qc-corrupt", ""]);
+    if (qc.flags & 4) out.push(["空镜", "qc-blank", qcNum(qc.blankConf)]);
+    if (qc.flags & 8) out.push(["脏污", "qc-dirt", qcNum(qc.dirtConf)]);
+    if (qc.flags & 16) out.push(["模糊", "qc-blur", qcNum(qc.blurConf)]);
+    // 曝光单独显示方向（欠曝/过曝），比笼统的"曝光"有用；值用平均亮度
     if (qc.flags & 32) {
-      out.push([qc.expOver ? "过曝" : qc.expUnder ? "欠曝" : "曝光", "qc-exposure"]);
+      out.push([qc.expOver ? "过曝" : qc.expUnder ? "欠曝" : "曝光", "qc-exposure", qcNum(qc.expMean)]);
     }
-    if (qc.flags & 64) out.push(["噪点", "qc-noise"]);
-    if (qc.flags & 128) out.push(["抖动", "qc-shake"]);
+    if (qc.flags & 64) out.push(["噪点", "qc-noise", qcNum(qc.noiseConf)]);
+    if (qc.flags & 128) out.push(["抖动", "qc-shake", qcNum(qc.shakeAmp)]);
     return out;
   }
 
@@ -735,7 +774,7 @@
     }
     stack.innerHTML = "";
     qcFlagList(f.qc).forEach(function (p) {
-      stack.appendChild(mkBadge(p[0], p[1]));
+      stack.appendChild(mkBadge(p[0] + (p[2] || ""), p[1]));
     });
     stack.style.display = stack.children.length ? "flex" : "none";
   }
@@ -766,12 +805,14 @@
       }
       if (own.length < S.page) S.hasMore = false;
       S.loading = false;
+      removeSkeleton(); // 数据已到（含空目录）：骨架使命结束，别让它卡在空目录页
       updateStat();
       measure();
       render();
       return arr;
     }).catch(function (e) {
       S.loading = false;
+      removeSkeleton();
       toast("加载文件失败: " + e.message + netHint(e));
     });
   }
@@ -828,6 +869,14 @@
   }
 
   function render() {
+    // 骨架屏退场：真实数据一到就撤（空数据时也会跑到这里，那时骨架保留）。
+    // stagger 只在"新数据到达后的第一窗"播一次：滚动补窗不播，避免刷屏闪烁。
+    var fresh = false;
+    if (S.items.length) {
+      removeSkeleton();
+      fresh = S.enterFresh;
+      S.enterFresh = false;
+    }
     var total = S.items.length;
     var rows = Math.ceil(total / S.cols);
     el.grid.style.height = Math.max(0, rows * S.rowH - S.gap) + "px";
@@ -860,10 +909,16 @@
       }
     });
 
+    var freshIdx = 0;
     for (var j = start; j < end; j++) {
       var node = S.pool.get(j);
       if (!node) {
         node = createCard(S.items[j], j);
+        if (fresh) {
+          node.classList.add("card-in");
+          node.style.animationDelay = Math.min(freshIdx, 8) * 20 + "ms";
+          freshIdx++;
+        }
         S.pool.set(j, node);
         el.grid.appendChild(node);
       }
@@ -1109,7 +1164,18 @@
 
   function applyLocal(id, decision) {
     var f = S.byId[id];
+    var prev = f ? f.decision : null;
     if (f) f.decision = decision;
+    // 本层进度条即时跳动：本层文件的决策变化先本地加减一（父目录文件不计入本层），
+    // 随后 refreshFolderSoon 用服务端权威计数校正（覆盖别人的标记 / 清空 / 口径差异）。
+    if (f && !f.fromParent && prev !== decision) {
+      var was = (prev === 1 || prev === 2) ? 1 : 0;
+      var now = (decision === 1 || decision === 2) ? 1 : 0;
+      if (was !== now) {
+        S.folderMarked = Math.max(0, (S.folderMarked || 0) + (now - was));
+        updateFolderBar();
+      }
+    }
     // 「完成审阅」的临时列表是另一批对象，同样要更新，否则灯箱里三个按钮的高亮不跟着变
     if (S.lbOverride) {
       S.lbOverride.forEach(function (x) { if (String(x.id) === String(id)) x.decision = decision; });
@@ -1125,6 +1191,7 @@
       }
     });
     updateStat();
+    refreshFolderSoon(); // 去抖：全局条 + 本层条一起用服务端口径对账
     var cur = lbList()[S.lbIndex];
     if (S.lbIndex >= 0 && cur && cur.id === id) updateLbButtons();
   }
@@ -1138,7 +1205,51 @@
     el.stat.textContent = (S.user ? S.user + " · " : "") + txt;
   }
 
+  // 两条进度条的服务端对账（去抖 120ms，多次标记合并成一次）：
+  // ①全局条 → /api/status 的 totals（服务端 1s 记忆，很便宜）；②本层条 → /api/folder 的 marked/files。
+  // 本地即时跳动由 applyLocal 负责，这里负责校正（别人的标记 / 清空 / 分页口径差异）。
+  function refreshFolderSoon() {
+    clearTimeout(S.folderProgTimer);
+    S.folderProgTimer = setTimeout(function () {
+      api("/api/status").then(function (st) {
+        S.totals = st.totals || null;
+        updateTreeBar();
+      }).catch(function () {});
+      if (!S.folderId) return;
+      api("/api/folder?folder=" + S.folderId).then(function (d) {
+        S.folderMarked = (d.markedDone != null ? d.markedDone : d.marked) || 0;
+        S.folderFiles = d.files || 0;
+        updateFolderBar();
+      }).catch(function () {});
+    }, 120);
+  }
+
+  // 侧栏全局进度条：已完成审阅（保留+不保留）/ 全部总数。数据 = /api/status 的 totals。
+  function updateTreeBar() {
+    var fill = document.getElementById("tree-prog-fill");
+    var label = document.getElementById("tree-prog-label");
+    if (!fill || !label) return;
+    var t = S.totals;
+    if (!t || !t.files) { label.textContent = "全部已完成审阅 0 / 0"; fill.style.transform = "scaleX(0)"; return; }
+    var done = (t.keep || 0) + (t.reject || 0);
+    var pct = Math.round(done / t.files * 100);
+    label.textContent = "全部已完成审阅 " + done + " / " + t.files + "（" + pct + "%）";
+    fill.style.transform = "scaleX(" + (done / t.files) + ")";
+  }
+
+  // 本层进度条：只算当前目录直属文件的 已标记/总数。
+  function updateFolderBar() {
+    var fill = document.getElementById("folder-prog-fill");
+    var label = document.getElementById("folder-prog-label");
+    if (!fill || !label) return;
+    var total = S.folderFiles || 0, done = S.folderMarked || 0;
+    var pct = total ? Math.round(done / total * 100) : 0;
+    label.textContent = "本层已审 " + done + " / " + total + "（" + pct + "%）";
+    fill.style.transform = "scaleX(" + (total ? done / total : 0) + ")";
+  }
+
   function refreshTreeSoon() {
+    refreshFolderSoon(); // 标记变更的 SSE 都会路过这里：顺带去抖对账本层进度条
     clearTimeout(S.refreshTimer);
     S.refreshTimer = setTimeout(function () {
       loadTree(0).then(function () {
@@ -1553,7 +1664,7 @@
       flags.forEach(function (it) {
         var b = document.createElement("span");
         b.className = "qc-lb " + it[1];
-        b.textContent = it[0];
+        b.textContent = it[0] + (it[2] || "");
         bar.appendChild(b);
       });
       el.lbBody.parentNode.insertBefore(bar, el.lbBody);
@@ -2173,6 +2284,203 @@
     day: "按天：N 天后失效"
   };
 
+  // ---------- QC 判定阈值调节（检测算法零改动，只调"是/否"那条线） ----------
+  // 行定义：[key, 中文名, 一句白话(悬停提示), 方向]。范围/步长来自后端 specs（单一事实源）。
+  var TH_ROWS = [
+    ["blurLapStd", "模糊", "画面越糊越容易判模糊（指标：拉普拉斯标准差）", "调大→更严"],
+    ["noiseFloor", "噪点", "噪点越重越容易判噪点（指标：平坦区噪声底线）", "调大→更宽松"],
+    ["blankStd", "空镜", "画面越单调越容易判空镜（指标：灰度标准差）", "调大→更严"],
+    ["expUnder", "欠曝", "画面整体越暗越容易判欠曝", "调大→更严"],
+    ["expOver", "过曝", "画面整体越亮越容易判过曝", "调大→更宽松"],
+    ["shakeRms", "抖动", "帧间晃动越大越容易判抖动", "调大→更宽松"],
+    ["dupSim", "重复", "两张相似度高于此值判重复（如 0.9 = 90% 相似就算）", "调大→更严"]
+  ];
+
+  var thProg = null; // 阈值重跑进度态 {total,done,num,fill}；null = 没有正在展示的进度
+
+  function openThresholdModal() {
+    api("/api/qc/thresholds").then(function (d) {
+      if (!d.available) { toast("QC 不可用（缺 ffmpeg），无法调阈值"); return; }
+      showThresholdModal(d);
+    }).catch(function (e) { toast("读取阈值失败: " + e.message + netHint(e)); });
+  }
+
+  function showThresholdModal(d) {
+    var specs = d.specs || {};
+    var defaults = d.defaults || {};
+    var draft = {};
+    TH_ROWS.forEach(function (row) {
+      var v = Number(d.current[row[0]]);
+      if (!isFinite(v)) v = Number(defaults[row[0]]);
+      draft[row[0]] = v;
+    });
+    el.modalTitle.textContent = "调节 QC 判定阈值";
+    el.modalBody.innerHTML = "";
+
+    var hint = document.createElement("div");
+    hint.className = "hint";
+    hint.style.fontSize = "12.5px";
+    hint.style.marginBottom = "6px";
+    hint.textContent = "只调「是/否」判定线，检测算法不变。默认值经实拍校准（宁漏勿滥）；应用后按新阈值重新检测全部文件。";
+    el.modalBody.appendChild(hint);
+
+    var rows = {};
+    TH_ROWS.forEach(function (row) {
+      var key = row[0], sp = specs[key] || {};
+      var line = document.createElement("div");
+      line.className = "th-row";
+      var name = document.createElement("span");
+      name.className = "th-name";
+      name.textContent = row[1];
+      name.title = row[2];
+      var rng = document.createElement("input");
+      rng.type = "range";
+      rng.min = sp.min; rng.max = sp.max; rng.step = sp.step;
+      rng.value = draft[key];
+      var num = document.createElement("input");
+      num.type = "number";
+      num.min = sp.min; num.max = sp.max; num.step = sp.step;
+      num.value = draft[key];
+      var dir = document.createElement("span");
+      dir.className = "th-dir";
+      dir.textContent = row[3];
+      var reset = document.createElement("button");
+      reset.className = "btn th-reset";
+      reset.textContent = "默认";
+      reset.title = "恢复校准默认值 " + defaults[key];
+      reset.onclick = function () {
+        rng.value = defaults[key];
+        num.value = defaults[key];
+        draft[key] = Number(defaults[key]);
+      };
+      rng.oninput = function () { num.value = rng.value; draft[key] = Number(rng.value); };
+      num.onchange = function () {
+        var v = Number(num.value);
+        if (!isFinite(v)) v = draft[key];
+        if (v < sp.min) v = sp.min;
+        if (v > sp.max) v = sp.max;
+        num.value = v;
+        rng.value = v;
+        draft[key] = v;
+      };
+      line.appendChild(name);
+      line.appendChild(rng);
+      line.appendChild(num);
+      line.appendChild(dir);
+      line.appendChild(reset);
+      el.modalBody.appendChild(line);
+      rows[key] = { rng: rng, num: num };
+    });
+
+    var foot = document.createElement("div");
+    foot.className = "modal-foot";
+    var cancel = document.createElement("button");
+    cancel.className = "btn";
+    cancel.textContent = "取消";
+    cancel.onclick = closeModal;
+    var resetAll = document.createElement("button");
+    resetAll.className = "btn";
+    resetAll.textContent = "全部恢复默认";
+    resetAll.onclick = function () {
+      TH_ROWS.forEach(function (row) {
+        rows[row[0]].rng.value = defaults[row[0]];
+        rows[row[0]].num.value = defaults[row[0]];
+        draft[row[0]] = Number(defaults[row[0]]);
+      });
+    };
+    var apply = document.createElement("button");
+    apply.className = "btn primary";
+    apply.textContent = "应用并重新检测";
+    apply.onclick = function () {
+      var body = {};
+      TH_ROWS.forEach(function (row) { body[row[0]] = draft[row[0]]; });
+      apply.disabled = true;
+      api("/api/qc/thresholds", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      }).then(function (res) {
+        if (!res.requeued) { closeModal(); toast("阈值未变化，无需重新检测"); return; }
+        showThresholdProgress(res.requeued);
+      }).catch(function (e) {
+        apply.disabled = false;
+        var m = (e && e.message) || "";
+        if (/loopback|127\.0\.0\.1|403/i.test(m)) toast("调阈值只允许在本机（127.0.0.1）操作");
+        else toast("应用失败: " + m + netHint(e));
+      });
+    };
+    foot.appendChild(cancel);
+    foot.appendChild(resetAll);
+    foot.appendChild(apply);
+    el.modalBody.appendChild(foot);
+    el.modal.classList.add("on");
+  }
+
+  // 应用后：弹窗切换成进度态（SSE 每广播一张的 qc 事件计一次数），跑完自动关。
+  // 用户可点「后台运行」提前关闭——后台继续跑，徽标仍会就地刷新。
+  function showThresholdProgress(total) {
+    el.modalTitle.textContent = "正在按新阈值重新检测";
+    el.modalBody.innerHTML = "";
+    var num = document.createElement("div");
+    num.className = "th-prog-num";
+    num.textContent = "0 / " + total;
+    var bar = document.createElement("div");
+    bar.className = "th-prog-bar";
+    var fill = document.createElement("div");
+    fill.className = "th-prog-fill";
+    bar.appendChild(fill);
+    var hint = document.createElement("div");
+    hint.className = "hint";
+    hint.style.fontSize = "12.5px";
+    hint.textContent = "可以点「后台运行」先回去审阅，跑完徽标自动刷新。视频多时会慢一些。";
+    el.modalBody.appendChild(num);
+    el.modalBody.appendChild(bar);
+    el.modalBody.appendChild(hint);
+    var foot = document.createElement("div");
+    foot.className = "modal-foot";
+    var bg = document.createElement("button");
+    bg.className = "btn";
+    bg.textContent = "后台运行";
+    bg.onclick = function () { thProg = null; closeModal(); toast("重新检测转入后台，完成后徽标自动刷新"); };
+    foot.appendChild(bg);
+    el.modalBody.appendChild(foot);
+    thProg = { total: total, done: 0, num: num, fill: fill };
+    updateThresholdProgress();
+    el.modal.classList.add("on");
+  }
+
+  function updateThresholdProgress() {
+    if (!thProg) return;
+    thProg.num.textContent = thProg.done + " / " + thProg.total;
+    thProg.fill.style.transform = "scaleX(" + (thProg.total ? thProg.done / thProg.total : 0) + ")";
+    if (thProg.done >= thProg.total) {
+      var t = thProg.total;
+      thProg = null;
+      toast("QC 重新检测完成（" + t + " 个），徽标已更新");
+      setTimeout(function () { closeModal(); }, 600);
+    }
+  }
+
+  // ---------- 骨架屏（拉数据空窗期占位；sweep 用 transform，遵守动效红线） ----------
+  function showSkeleton() {
+    if (document.querySelector(".skel-card")) return;
+    var cols = S.cols || 4, colW = S.colW || 220, gap = S.gap || 10;
+    var cellH = S.cellH || 200, rowH = S.rowH || (cellH + gap);
+    for (var i = 0; i < 8; i++) {
+      var d = document.createElement("div");
+      d.className = "skel-card";
+      d.style.left = (i % cols) * (colW + gap) + "px";
+      d.style.top = Math.floor(i / cols) * (rowH + gap) + "px";
+      d.style.width = colW + "px";
+      d.style.height = cellH + "px";
+      el.grid.appendChild(d);
+    }
+  }
+  function removeSkeleton() {
+    var sk = document.querySelectorAll(".skel-card");
+    for (var i = 0; i < sk.length; i++) sk[i].remove();
+  }
+
   function onShare() {
     if (!S.isMaster) { toast("需要以主口令登录后才能生成分享链接"); return; }
     el.modalTitle.textContent = "生成分享链接";
@@ -2393,6 +2701,10 @@
   function clearLocalItems() {
     S.items.forEach(function (f) { applyLocal(f.id, 0); });
     updateStat();
+    // 整个目录被清空：本层已标记直接归零（未载入的分页文件也算），再去抖对账。
+    S.folderMarked = 0;
+    updateFolderBar();
+    refreshFolderSoon();
   }
 
   // 服务端给的路径是本机绝对路径（素材根目录、导出目标目录）。
@@ -2623,6 +2935,8 @@
     return api("/api/status").then(function (st) {
       S.canDownload = !!st.canDownload;
       S.isMaster = !!st.isMaster;
+      S.totals = st.totals || null; // 全库口径（与仪表盘同一份 totalsSnapshot）
+      updateTreeBar();
       S.folderRel = st.root || "";
       if (st.root) el.crumb.textContent = st.root.split(/[\\/]/).pop() || st.root;
       el.crumb.title = st.root || "未设置";
@@ -2698,6 +3012,8 @@
         // 灯箱正好开在它上面时同步重画脏点框。不改 decision，纯辅助提示。
         var qf = d.data;
         if (!qf || qf.fileId == null) return;
+        // 阈值重跑进度：每广播一张的 qc 事件计一次（进度弹窗开着才有效）。
+        if (thProg) { thProg.done = Math.min(thProg.total, thProg.done + 1); updateThresholdProgress(); }
         var it = S.byId[qf.fileId];
         if (!it) return;
         it.qc = qf.qc;

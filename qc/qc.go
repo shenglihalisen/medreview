@@ -190,6 +190,26 @@ type QCService struct {
 	hwPickedAt time.Time // 上次结论是什么时候测出来的（只用于日志）
 
 	ms MetaStore // 可选：持久化的键/值通道，用来复用上次探测结论
+
+	// th 是"是/否"判定阈值（运行时可调，默认=编译期校准常量，见 thresholds.go）。
+	// thMu 保护读写；每次检测取快照——改阈值不影响正在算的那个文件，下一次检测生效。
+	thMu sync.RWMutex
+	th   Thresholds
+}
+
+// SetThresholds 原子替换判定阈值（先钳回合法范围）。检测算法零改动，只换判定线。
+func (s *QCService) SetThresholds(t Thresholds) {
+	t = ClampThresholds(t)
+	s.thMu.Lock()
+	s.th = t
+	s.thMu.Unlock()
+}
+
+// CurrentThresholds 返回当前生效阈值的副本（快照，调用方可放心长期持有）。
+func (s *QCService) CurrentThresholds() Thresholds {
+	s.thMu.RLock()
+	defer s.thMu.RUnlock()
+	return s.th
 }
 
 // MetaStore 只要求一条键/值读写通道（上层拿 Store 的适配方法传进来）。
@@ -208,7 +228,7 @@ func NewQCService(ffmpeg, ffprobe, cacheDir string) *QCService {
 	if ffprobe == "" {
 		log.Println("QC: 未提供 ffprobe，细节提取退回正方形缩放（模糊/噪点在极端宽高比上精度略差）")
 	}
-	return &QCService{ffmpeg: ffmpeg, ffprobe: ffprobe, dir: cacheDir}
+	return &QCService{ffmpeg: ffmpeg, ffprobe: ffprobe, dir: cacheDir, th: DefaultThresholds()}
 }
 
 // sourceSize 用 ffprobe 取源素材的像素尺寸（只读头部，很快）。
@@ -568,7 +588,7 @@ func (s *QCService) ProbeHWAccel(ctx context.Context, src string, choice string)
 		log.Printf("QC: 试过的 %d 条显卡解码都没取到帧（大概率静默回退软解），视频 QC 用 CPU 软解（%.1f 秒）",
 			len(cands), cpuSec)
 	default:
-		log.Printf("QC: 解码探测整个不出帧（CPU 软解和三种显卡都不行），视频 QC 回退 CPU 软解（%s）", filepath.Base(src))
+		log.Printf("QC: 解码探测完全失败（CPU 软解与 cuda/qsv/d3d11va 在 90s 内均取不到帧），QC 改走默认软解跑全片（%s）；若全片仍取不到帧将判损坏", filepath.Base(src))
 	}
 	s.hwMu.Lock()
 	s.hwMode, s.hwProbed, s.hwPickedAt = mode, true, time.Now()
@@ -748,7 +768,8 @@ func (s *QCService) runImage(ctx context.Context, src string) (*QCResult, error)
 // blurExtra/detail 流的结果由调用方传入（nil = 图片路径，正常单帧流程）。
 func (s *QCService) judgeFrame(ctx context.Context, gray []byte, src string) *QCResult {
 	r := &QCResult{}
-	if blank, std := detectBlank(gray, GraySize); blank {
+	th := s.CurrentThresholds() // 本次判定用的阈值快照
+	if blank, std := detectBlank(gray, GraySize, th.BlankStd); blank {
 		r.Flags |= FlagBlank
 		r.Blank = &DetectorOut{Conf: std}
 	}
@@ -759,7 +780,7 @@ func (s *QCService) judgeFrame(ctx context.Context, gray []byte, src string) *QC
 	}
 	// 曝光是直方图统计，与分辨率无关，用现成的 64 灰度即可。
 	// 指标本身总是记下来（校准/排查要看），但只有越过阈值才挂 Exposure 对象和位掩码。
-	if exp := detectExposure(gray, GraySize); exp != nil {
+	if exp := detectExposure(gray, GraySize, th.ExpUnder, th.ExpOver); exp != nil {
 		r.ExpMean, r.ExpClipLow, r.ExpClipHigh = exp.Mean, exp.ClipLow, exp.ClipHigh
 		if exp.Under || exp.Over {
 			r.Flags |= FlagExposure
@@ -777,13 +798,13 @@ func (s *QCService) judgeFrame(ctx context.Context, gray []byte, src string) *QC
 		if detail, dw, dh, derr := s.detailGray(ctx, src, false); derr == nil {
 			lap := lapStdOf(detail, dw, dh)
 			r.LapStd = lap
-			if lap < BlurLapStdThresh && r.Flags&FlagBlank == 0 {
+			if lap < th.BlurLapStd && r.Flags&FlagBlank == 0 {
 				r.Flags |= FlagBlur
 				r.Blur = &DetectorOut{Conf: lap}
 			}
 			floor := noiseFloorOf(detail, dw, dh)
 			r.NoiseFloor = floor
-			if floor > NoiseFloorThresh {
+			if floor > th.NoiseFloor {
 				r.Flags |= FlagNoise
 				r.Noise = &DetectorOut{Conf: floor}
 			}
@@ -841,7 +862,7 @@ func (s *QCService) runVideo(ctx context.Context, src string) (*QCResult, error)
 			r.DupHash = fmt.Sprintf("%016x", pHash(frame, GraySize))
 			first = false
 		}
-		blank, _ := detectBlank(frame, GraySize)
+		blank, _ := detectBlank(frame, GraySize, s.CurrentThresholds().BlankStd)
 		blankFlags = append(blankFlags, blank)
 		if blank {
 			blankHits++
@@ -851,7 +872,7 @@ func (s *QCService) runVideo(ctx context.Context, src string) (*QCResult, error)
 			dirtHits++
 			dirtBoxes, dirtConf = boxes, conf
 		}
-		if exp := detectExposure(frame, GraySize); exp != nil {
+		if exp := detectExposure(frame, GraySize, s.CurrentThresholds().ExpUnder, s.CurrentThresholds().ExpOver); exp != nil {
 			expMeanSum += exp.Mean
 			expLowSum += exp.ClipLow
 			expHighSum += exp.ClipHigh
@@ -870,6 +891,7 @@ func (s *QCService) runVideo(ctx context.Context, src string) (*QCResult, error)
 
 	if n == 0 {
 		// 一帧都解不出来 → 损坏（不参与 30% 投票）
+		log.Printf("QC: %s 全片 CPU 软解一帧都取不到 → 判损坏", filepath.Base(src))
 		return &QCResult{Flags: FlagCorrupted, Corrupted: true}, nil
 	}
 
@@ -912,10 +934,10 @@ func (s *QCService) runVideo(ctx context.Context, src string) (*QCResult, error)
 				lapSum += lap
 				floorSum += floor
 				blank := idx < len(blankFlags) && blankFlags[idx]
-				if lap < BlurLapStdThresh && !blank {
+				if lap < s.CurrentThresholds().BlurLapStd && !blank {
 					blurHits++
 				}
-				if floor > NoiseFloorThresh {
+				if floor > s.CurrentThresholds().NoiseFloor {
 					noiseHits++
 				}
 				blurSamples++
@@ -974,7 +996,7 @@ func (s *QCService) runVideo(ctx context.Context, src string) (*QCResult, error)
 				flipRate = float64(flips) / float64(flipsN)
 			}
 			log.Printf("QC 抖动: %s 帧=%d amp=%.2f flip=%.0f%%", filepath.Base(src), len(rowProjs), amp, flipRate*100)
-			if amp > ShakeRmsThresh && flipRate > ShakeFlipRate {
+			if amp > s.CurrentThresholds().ShakeRms && flipRate > ShakeFlipRate {
 				r.Flags |= FlagShake
 				r.Shake = &ShakeOut{Amp: amp}
 			}
@@ -1074,7 +1096,7 @@ func smooth3(v []float64) []float64 {
 }
 
 // detectBlank 全局灰度标准差极低（全黑/全白/纯色）判空镜。
-func detectBlank(buf []byte, q int) (bool, float64) {
+func detectBlank(buf []byte, q int, blankStd float64) (bool, float64) {
 	var sum, sum2 float64
 	n := float64(len(buf))
 	for _, b := range buf {
@@ -1088,7 +1110,7 @@ func detectBlank(buf []byte, q int) (bool, float64) {
 		variance = 0
 	}
 	std := math.Sqrt(variance)
-	return std < BlankStdThresh, std
+	return std < blankStd, std
 }
 
 // stdOfGray 全局灰度标准差。
@@ -1113,7 +1135,7 @@ func stdOfGray(buf []byte) float64 {
 // 为什么不能只看均值：夜景本来就暗、雪地本来就亮，那是**正常**曝光。
 // 真正的欠曝/过曝特征是直方图在 0 或 255 处堆出一个尖峰（暗部被压死 / 高光糊掉），
 // 所以判据是「近黑/近白像素占比过高」**并且**整体确实偏暗/偏亮 —— 两个条件一起才成立。
-func detectExposure(buf []byte, q int) *ExposureOut {
+func detectExposure(buf []byte, q int, underMean, overMean float64) *ExposureOut {
 	var sum float64
 	low, high := 0, 0
 	n := len(buf)
@@ -1132,10 +1154,10 @@ func detectExposure(buf []byte, q int) *ExposureOut {
 		ClipLow:  float64(low) / float64(n),
 		ClipHigh: float64(high) / float64(n),
 	}
-	if mean < ExpUnderMean && out.ClipLow > ExpClipLowThresh {
+	if mean < underMean && out.ClipLow > ExpClipLowThresh {
 		out.Under = true
 	}
-	if mean > ExpOverMean && out.ClipHigh > ExpClipHighThresh {
+	if mean > overMean && out.ClipHigh > ExpClipHighThresh {
 		out.Over = true
 	}
 	return out
