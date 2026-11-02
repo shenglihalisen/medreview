@@ -1,8 +1,12 @@
 # medreview
 
-Windows 本地运行的照片 / 视频人工筛选工具。多人按目录并行标记「保留 / 不保留」，审完一键打包或导出。**源文件全程只读**：程序只读取素材，不会移动、修改或删除任何原文件。
+[**简体中文**](#简体中文) | [English](#english)
 
 ---
+
+# 简体中文
+
+Windows 本地运行的照片 / 视频人工筛选工具。多人按目录并行标记「保留 / 不保留」，审完一键打包或导出。**源文件全程只读**：程序只读取素材，不会移动、修改或删除任何原文件。
 
 ## 目录
 
@@ -18,8 +22,6 @@ Windows 本地运行的照片 / 视频人工筛选工具。多人按目录并行
 - [10. 已知限制](#10-已知限制)
 - [11. QC 质量检测](#11-qc-质量检测)
 
----
-
 ## 1. 功能
 
 | 能力 | 说明 |
@@ -34,8 +36,6 @@ Windows 本地运行的照片 / 视频人工筛选工具。多人按目录并行
 | 多端 | 电脑浏览器与手机（同 Wi-Fi）均可打开；手机端为移动端布局 |
 | 控制台 | 黑窗口（控制台版）或 WebView2 本地窗口（wails 版）实时显示地址、口令与日志 |
 | QC 质量检测 | 自动检出损坏 / 重复 / 空镜 / 镜头脏点 / 模糊 / 欠曝 / 过曝 / 噪点 / 视频抖动，卡片徽章 + 灯箱红框标注，**只标注、绝不修改保留 / 不保留结论** |
-
----
 
 ## 2. 快速开始
 
@@ -76,8 +76,6 @@ go build -tags gui -ldflags "-H=windowsgui" -o medreview_ui.exe .
 
 > **tag 铁律**：wails 版必须同时带 `desktop` 与 `production`。只写 `wails` 时，wails 会编入「未使用正确构建标签」的运行时报错弹窗，且桌面前端为空壳，窗口永远出不来。
 
----
-
 ## 3. 架构与源码结构
 
 单进程 Go 服务 + 原生前端，无外部服务依赖（数据库为嵌入式 SQLite，通过纯 Go 驱动 `modernc.org/sqlite`）。
@@ -109,8 +107,6 @@ _verify/             验收脚本（见第 8 节）
 
 前端改动后必须重新构建：`web/` 与 `ui/` 均在编译期嵌入二进制。
 
----
-
 ## 4. 构建
 
 三种构建互斥，由构建标签决定 `buildMode`：
@@ -122,8 +118,6 @@ _verify/             验收脚本（见第 8 节）
 | `-tags gui` | 纯 Win32 控件窗口 | WebView2 不可用时的兜底 |
 
 ffmpeg 内嵌机制（Windows）：`tools/ffmpeg/` 下的 `ffmpeg.exe`、`ffprobe.exe` 通过 `go:embed` 编入二进制；磁盘上 `tools/ffmpeg/` 存在时优先使用磁盘版本，否则首次启动释放到 `%LocalAppData%\medreview\tools\ffmpeg\`（按文件大小比对决定是否重新释放）。因此二进制体积约 220 MB 属预期。
-
----
 
 ## 5. 运行参数
 
@@ -143,8 +137,6 @@ ffmpeg 内嵌机制（Windows）：`tools/ffmpeg/` 下的 `ffmpeg.exe`、`ffprob
 | `-log` | 自动选择 | 日志文件路径；依次尝试当前目录 → 程序目录 → 临时目录 |
 
 退出行为：正常退出（Ctrl+C、关闭窗口、点停止服务）清空转码与预览缓存；被强制结束（直接关闭黑窗口、任务管理器结束）不执行清理，残留由下次启动兜底清理。
-
----
 
 ## 6. HTTP 接口
 
@@ -170,8 +162,6 @@ ffmpeg 内嵌机制（Windows）：`tools/ffmpeg/` 下的 `ffmpeg.exe`、`ffprob
 
 「下载权限」＝ URL 中 `?t=<口令>` 或 Cookie `mr_dl` 与当前口令一致，或使用 `-open-dl` 关闭校验。
 
----
-
 ## 7. 数据模型
 
 - `file`：以 `rel_path`（相对素材根目录）为唯一键；`present` 表示本轮扫描是否存在。
@@ -181,8 +171,6 @@ ffmpeg 内嵌机制（Windows）：`tools/ffmpeg/` 下的 `ffmpeg.exe`、`ffprob
 - `meta`：仅存 `root_path`（上次素材根目录，绝对路径）与扫描完成时间。
 
 扫描语义：新一轮扫描先把全部文件置为 `present=0`；命中相同 `rel_path` 时按 `size`+`mtime` 比对，**仅当内容变化才作废该文件的既有结论**，未变化则保留标记。因此素材目录整体迁移到新路径后，只要文件本身未变，标记会自动接上。
-
----
 
 ## 8. 验收
 
@@ -199,8 +187,6 @@ check_token_random.py      下载口令随机性、启动器不写死口令
 ```
 
 另有 `go test -run 'TestSetRoot|TestSetToken|TestRebind'`，覆盖运行时修改根目录 / 口令 / 端口三条路径。
-
----
 
 ## 9. 安全模型与风险
 
@@ -241,8 +227,6 @@ check_token_random.py      下载口令随机性、启动器不写死口令
 - 响应头固定 `X-Content-Type-Options: nosniff` 与 `Referer-Policy: no-referrer`。
 - 随机数源失败时拒绝启动，不降级为固定口令。
 
----
-
 ## 10. 已知限制
 
 - 仅支持 Windows（ffmpeg 内嵌与快捷方式生成依赖 Windows）。
@@ -250,8 +234,6 @@ check_token_random.py      下载口令随机性、启动器不写死口令
 - 转码缓存关闭程序时清空，下次启动需重新转码（`--vkeep` 可保留）。
 - 单实例使用同一端口；端口被占用时启动失败并给出提示。
 - 素材目录内的软链接、稀疏文件不在支持范围内。
-
----
 
 ## 11. QC 质量检测
 
@@ -284,10 +266,278 @@ check_token_random.py      下载口令随机性、启动器不写死口令
 - 视频解码可走硬件加速（`cuda` / `qsv` / `d3d11va`）做 NVDEC 抽帧，失败自动回退软解；检测数值不受影响。硬件探测结论跨启动缓存。
 - 源文件全程只读，QC 不写入、不移动、不删除任何原文件。
 
----
-
 ## 许可证
 
 AGPL-3.0（GNU Affero General Public License v3.0），见 [LICENSE](./LICENSE)。
 
 第三方组件：构建时通过 `go:embed` 打包的 `ffmpeg` / `ffprobe`（[FFmpeg](https://ffmpeg.org/)，依其自身许可证发布，本项目不随仓库分发，需自行准备）。
+
+---
+
+# English
+
+A local, Windows-based manual photo/video triage tool. Multiple people mark files "keep / reject" in parallel per folder, then export or package the results in one click. **Source files are read-only throughout**: the program only reads media, and never moves, modifies, or deletes any original file.
+
+## Contents
+
+- [1. Features](#1-features)
+- [2. Quick start](#2-quick-start)
+- [3. Architecture and source layout](#3-architecture-and-source-layout)
+- [4. Build](#4-build)
+- [5. Runtime flags](#5-runtime-flags)
+- [6. HTTP API](#6-http-api)
+- [7. Data model](#7-data-model)
+- [8. Acceptance tests](#8-acceptance-tests)
+- [9. Security model and risks](#9-security-model-and-risks)
+- [10. Known limitations](#10-known-limitations)
+- [11. QC (quality checks)](#11-qc-quality-checks)
+
+## 1. Features
+
+| Capability | Description |
+| --- | --- |
+| Folder tree | Pick a media folder from the server-side tree; optional "include parent" browsing (files directly in the parent are listed too, while marking and packaging rules stay unchanged) |
+| Manual marking | Mark a single file, batch-mark the visible area, **or mark the whole folder** (all keep / all reject / clear this folder's marks) |
+| Folder claiming | Per-folder lock: once claimed, others are read-only. **The lock applies to this folder only and does not recurse** |
+| Video transcoding | Formats browsers cannot play (HEVC/H.265 etc.) are transcoded to H.264 by the embedded ffmpeg and cached, with live progress |
+| Image preview | Large images use a low-res transcode (smaller side capped at 1600 by default); the lightbox can show the original; EXIF orientation is handled |
+| Download / export | Three modes: browser ZIP download, export to a local directory, export the list of kept file paths |
+| Export manifest | A CSV manifest (folder, filename, kept, exported, size) is generated on export/zip; opens directly in Excel |
+| Multi-device | Desktop browsers and phones on the same Wi-Fi; the phone layout is mobile-native |
+| Console | Live address, token, and logs in a console window or a WebView2 desktop window (wails build) |
+| QC | Automatically detects corrupted / duplicate / blank / lens-dirt / blur / under- and over-exposure / noise / video shake, shown as card badges and lightbox boxes. **Annotation only — never changes keep/reject decisions** |
+
+## 2. Quick start
+
+### 2.1 Using the portable package (recommended)
+
+The portable package contains three files: `medreview.exe`, `start.bat`, `说明.txt`.
+
+```
+Double-click start.bat
+  1) Media folder: drag a folder into the window, paste a full path, or press Enter to reuse the last one
+  2) Download token: custom (e.g. 1234), or press Enter for a random token each start
+  3) Port: press Enter for 8080; if it is taken, use another port (e.g. 8081)
+
+Alternatively: drag a media folder onto the start.bat icon to start with that folder directly.
+```
+
+The browser opens the **review page** automatically (blue "review mode · read-only marking" badge). Switch to the **download page** in-page when you need downloads (green "download mode" badge). Closing the console window stops the service.
+
+Runtime: Windows 10/11 x64 (Chinese systems; the launcher prompts are GBK-encoded). No dependencies required.
+
+### 2.2 Building from source
+
+Prerequisites:
+
+1. Go 1.26+ (no CGO, no gcc needed).
+2. For transcoding, put `ffmpeg.exe` and `ffprobe.exe` into `tools/ffmpeg/` (they are embedded into the binary via `go:embed`; without them the build has no transcoding or low-res preview).
+
+```bash
+# Console build (black window)
+go build -o medreview.exe .
+
+# WebView2 desktop window build (no console; requires both desktop and production tags)
+go build -tags "wails,desktop,production" -ldflags "-H=windowsgui" -o medreview_ui.exe .
+
+# Pure Win32 window build (no console; fallback when WebView2 is unavailable)
+go build -tags gui -ldflags "-H=windowsgui" -o medreview_ui.exe .
+```
+
+> **Tag rule**: the wails build must include both `desktop` and `production`. With only `wails`, the binary embeds the "incorrect build tags" runtime error dialog and the desktop frontend is an empty shell — the window never appears.
+
+## 3. Architecture and source layout
+
+A single-process Go service with a native frontend, no external services (SQLite embedded via the pure-Go driver `modernc.org/sqlite`).
+
+```
+main.go              Entry: parse flags → build app → bind port → start scan → enter console/window per build mode
+app.go               Runtime core: bind / printBanner / startScan / serve / SetRoot / SetToken / Rebind / Status / cache cleanup on exit
+api.go               HTTP routes and all handlers (marking, claims, media, download/export, folder browsing)
+store.go             Data access: files / folders / reviews / claims / stats; absPath = root + relPath
+scanner.go           Media scan: incremental upsert keyed by rel_path; invalidates stale decisions when size+mtime change
+db.go                SQLite schema and connection
+video.go             ffmpeg transcoding: probe → transcode → cache → warm-up, cooperative cancellation
+image.go             Low-res image preview: transcode cache, EXIF orientation, per-folder warm-up
+copy.go              Export to a local directory (writes the manifest)
+zip.go               ZIP download (manifest included in the archive and written next to it)
+manifest.go          Export manifest CSV (UTF-8 BOM, Excel formula-injection escaping)
+events.go            SSE broadcasting (scan progress, decision changes, claim changes, folder-wide marking)
+lan.go               Local LAN IPv4 enumeration (cached, filters phantom adapters)
+ffmpeg_embed.go      Embedded ffmpeg / ffprobe extraction (Windows)
+console.go           Ring-buffer logs for the desktop window
+gui_win32.go         Pure Win32 desktop window (build tag: gui || wails)
+gui_wails.go         WebView2 desktop window (build tag: wails)
+mode_*.go            Build-mode constants (console / gui / wails)
+web/                 Review and download page frontends (go:embed into the binary)
+ui/                  WebView2 desktop console UI (go:embed into the binary)
+tools/               build_single.py (single-file build), make_lnk.py (shortcut creation); tools/ffmpeg/ is the embed source (not tracked)
+_verify/             Acceptance scripts (see section 8)
+```
+
+Frontend changes require a rebuild: both `web/` and `ui/` are embedded at compile time.
+
+## 4. Build
+
+The three builds are mutually exclusive; build tags select `buildMode`:
+
+| Build | Console | Notes |
+| --- | --- | --- |
+| Default | Console window | Daily use |
+| `-tags "wails,desktop,production"` | WebView2 desktop window | HTML/CSS UI; can change media root / port / token in place |
+| `-tags gui` | Pure Win32 controls | Fallback when WebView2 is unavailable |
+
+ffmpeg embedding (Windows): `ffmpeg.exe` and `ffprobe.exe` under `tools/ffmpeg/` are compiled into the binary via `go:embed`. If `tools/ffmpeg/` exists on disk it takes precedence; otherwise the tools are extracted to `%LocalAppData%\medreview\tools\ffmpeg\` on first start (re-extracted when file sizes differ). A binary size of ~220 MB is therefore expected.
+
+## 5. Runtime flags
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `-root` | Last used | Media root folder; a positional argument (drag onto the icon) also works |
+| `-addr` | `:8080` | Listen address, e.g. `:8080`, `0.0.0.0:8080` |
+| `-token` | Random per start | Download token, 24 hex chars (12 bytes of entropy) |
+| `-open-dl` | false | Disable download authorization (any page can zip/download) |
+| `-db` | `medreview.db` | Database path |
+| `-cache` | `cache` | Transcode cache directory |
+| `-vres` | 720 | Transcode size: cap on the smaller side; 0 keeps the original resolution |
+| `-ires` | 1600 | Image preview size: cap on the smaller side; 0 always uses originals |
+| `-vjobs` | 2 | Concurrent video warm-up jobs |
+| `-vkeep` | false | Keep the previous run's transcode outputs (cleared on every start by default) |
+| `-open` | false | Open the review page automatically after start |
+| `-log` | Auto | Log file path; tries the current directory → program directory → temp directory |
+
+Exit behavior: a normal exit (Ctrl+C, closing the window, stop button) clears transcode and preview caches; a forced kill skips cleanup, and leftovers are cleaned on the next start.
+
+## 6. HTTP API
+
+| Method and path | Auth | Description |
+| --- | --- | --- |
+| `GET /api/status` | None | Scan progress and stats |
+| `GET /api/folders`, `GET /api/folder` | None | Folder tree and folder info |
+| `GET /api/files` | None | Files in a folder (paged, filtered) |
+| `GET /api/media` | None; with `dl=1` requires download auth and a kept file | Image / video content |
+| `GET /api/vtrans`, `/api/vtrans-status`, `/api/vtrans-warmup` | None | Transcode outputs and status |
+| `POST /api/review`, `/api/review/batch` | None (subject to folder claim lock) | Marking |
+| `POST /api/review/clear-folder` | None (subject to claim lock) | Clear marks in this folder |
+| `POST /api/review/folder-decision` | None (subject to claim lock) | Mark the whole folder keep / reject |
+| `POST /api/claim`, `/api/claim/release` | None | Claim / release a folder |
+| `GET /api/users` | None | Recently used reviewer names (in-memory, lost on restart) |
+| `GET /api/events` | None | SSE event stream |
+| `GET /api/browse` | **Loopback only** | Enumerate local disk folders (for choosing the media root) |
+| `POST /api/scan` | **Loopback only** | Set a new media root and rescan |
+| `GET /api/zip` | Download auth | ZIP the kept files |
+| `GET /api/export` | Download auth | Absolute paths of kept files |
+| `POST /api/copy` | Download auth | Copy kept files to a local directory |
+| `GET /api/browse-dest` | Download auth | Browse / create export destination folders |
+
+"Download auth" = `?t=<token>` in the URL or the `mr_dl` cookie matches the current token, or authorization is disabled with `-open-dl`.
+
+## 7. Data model
+
+- `file`: unique key `rel_path` (relative to the media root); `present` marks whether the file exists in this scan.
+- `folder`: merged by `rel_path`; parent/child via `parent_id`.
+- `review`: primary key `file_id`; `decision` is `0` undecided / `1` keep / `2` reject, plus `reviewer` and timestamp.
+- `claim`: primary key `folder_id`, records the claimer.
+- `meta`: only `root_path` (last media root, absolute) and the scan completion time.
+
+Scan semantics: each new scan first sets every file to `present=0`; when the same `rel_path` is found, `size`+`mtime` are compared and **existing decisions are invalidated only when the content changed**. Moving the media folder to a new path therefore keeps decisions as long as files are unchanged.
+
+## 8. Acceptance tests
+
+Seven scripts under `_verify/`, 350+ assertions in total, run against the built executable: they create their own media, start/stop the service themselves, and exit non-zero on failure.
+
+```
+check_mobile_shell.py      Mobile layout, claims, name gate, LAN, hover preview, quality toggle, zoom
+check_keep_scope.py        Marking/packaging scope, visible range, folder-wide marking, claim blocking, API auth
+check_image_preview.py     Image preview, EXIF orientation, cache, file change, folder warm-up (needs Pillow)
+check_download_and_720p.py Transcode sizes and byte-identity across the four download paths
+check_startup_modes.py     Startup modes, build modes, endpoint presence and permissions
+check_startup_clean.py     Cache cleanup on startup and exit
+check_token_random.py      Token randomness; launcher never hardcodes a token
+```
+
+There is also `go test -run 'TestSetRoot|TestSetToken|TestRebind'`, covering runtime changes of root / token / port.
+
+## 9. Security model and risks
+
+**This project is a "local tool for a trusted LAN" and has no defenses for untrusted networks. Read this section before deploying.**
+
+### 9.1 Authentication and authorization today
+
+| Item | Status |
+| --- | --- |
+| Viewing media (`/api/media`, `/api/vtrans`) | **No auth.** Any device that can reach the port can read raw media |
+| Marking, claiming, clearing folder marks | **No auth.** Only the folder claim lock applies (and claims can be overridden by others) |
+| Download / ZIP / export | Requires the download token (random per start, 24 hex chars) |
+| Enumerating folders, changing the media root | Loopback only (`127.0.0.1` / `::1`); LAN calls return 403 |
+| Cross-site requests | CORS allows local origins only (loopback, localhost, local LAN IPs); non-browser clients are not constrained by CORS |
+
+### 9.2 Risk list
+
+| Risk | Level | Notes and advice |
+| --- | --- | --- |
+| Media readable by any device on the LAN | **High** | The review page must be able to show images to mark them, so media endpoints have no auth. Anyone on the same Wi-Fi can browse and download all media. **Use only on a trusted network**; never expose the port to the internet, a corporate WAN, or untrusted Wi-Fi |
+| Marks modifiable by any device | Medium | Unauthenticated writes; malicious or accidental changes can alter decisions. Use with a trusted team; isolate on a dedicated subnet when stronger guarantees are needed |
+| Download token exposure | Medium | The token appears in URL query strings, `urls.txt`, runtime logs, and browser history. `Referer-Policy: no-referrer` prevents referrer leakage; the token is random per start and dies on restart |
+| Plaintext transport | Medium | HTTP only, no TLS. Tokens and media travel in cleartext on the LAN |
+| ffmpeg decoding untrusted media | Medium | Warm-up (decoding) runs automatically on start and folder changes. ffmpeg has a history of codec CVEs. **Only review media from trusted sources** |
+| Unencrypted local database | Medium | `medreview.db` stores decisions and reviewer names in plaintext; treat it as sensitive, keep it with the program, and do not share it |
+| Export can write anywhere on the server | Low | A token holder can point the export at any destination directory (writes inside the media folder and to disk roots are rejected). Only already-marked media is written, so impact is limited |
+| Unsigned binary | Low | First run may trigger Windows SmartScreen ("Windows protected your PC"); choose "Run anyway". This is due to the missing code-signing certificate, not a defect |
+| Logs contain local details | Low | Runtime logs include absolute media paths, LAN addresses, and the download token. Logs stay in the run directory; do not share them casually |
+
+### 9.3 Measures already in place
+
+- Media files are read-only throughout: never written, moved, or deleted.
+- Export destinations cannot be inside the media folder (prevents recursive self-copying).
+- Manifest CSVs escape cells starting with `= + - @` to prevent Excel formula injection.
+- Export/ZIP reject relative paths containing `..` (defense in depth).
+- Folder enumeration and rescan endpoints are restricted to loopback.
+- Download, ZIP, export, and destination browsing all validate the download token.
+- Responses always carry `X-Content-Type-Options: nosniff` and `Referer-Policy: no-referrer`.
+- Startup is refused when the random source fails; it never falls back to a fixed token.
+
+## 10. Known limitations
+
+- Windows only (embedded ffmpeg and shortcut creation are Windows-specific).
+- The WebView2 build may hit renderer crash loops in some environments; use the console build when unstable.
+- The transcode cache is cleared when the program exits; the next start transcodes again (`--vkeep` keeps it).
+- A single instance per port; if the port is taken, startup fails with a message.
+- Symlinks and sparse files inside the media folder are unsupported.
+
+## 11. QC (quality checks)
+
+Quality checks (QC) are the **visual annotation layer** of the review workflow: a set of detectors runs alongside scanning/transcoding and surfaces results as card badges and lightbox boxes. **It only annotates and never touches `review.decision`** (keep/reject is always a human decision).
+
+### 11.1 Detectors
+
+| Detector | Description | Output |
+| --- | --- | --- |
+| corrupted | Unreadable, truncated, or damaged files | Boolean flag |
+| duplicate | Content hash + time/device + pixel confirmation to filter false positives | Hash value |
+| blank | Solid color, all black/white, or large uniform areas | Confidence |
+| lens-dirt | Lens smudges / dust spots; **shown as translucent boxes at the actual positions in the lightbox** | Confidence + bounding boxes |
+| blur | Missed focus, motion blur | Confidence (Laplacian standard deviation) |
+| under/over-exposure | Severely dark or bright images | Flag + mean luma + near-black/near-white pixel ratio |
+| noise | Severe high-ISO noise | Confidence (flat-block noise floor) |
+| shake | **Video** back-and-forth global motion between frames (stabilization check) | RMS amplitude (1 px ≈ 1.5% of the frame) |
+
+> **Calibration note**: these thresholds are **not yet calibrated against real-world footage**. The current policy is "prefer misses over false positives", with 2–3× headroom so normal photos are not flagged. Calibrate on a real media set before a formal release.
+
+### 11.2 Presentation
+
+- **Card badges**: a `.qc-stack` in the top-right corner of each thumbnail, one label per detected issue (corrupted / duplicate / blank / dirt / blur / exposure / noise).
+- **Lightbox boxes**: in the lightbox, lens-dirt is drawn as translucent boxes over the actual spots; press **H** to hide/show them (the preference is remembered).
+- **Issue list CSV**: the "issue list" button on the download page exports `qc-report.csv` listing corrupted / duplicate / blank / lens-dirt / blur / under- and over-exposed files (this folder and subfolders); opens directly in Excel.
+
+### 11.3 Performance and hardware
+
+- Frames are extracted by ffmpeg (a single frame for stills); detection runs on the CPU.
+- Video decoding can use hardware acceleration (`cuda` / `qsv` / `d3d11va`) for NVDEC frame extraction, falling back to software decoding; detection values are unaffected. Hardware probing results are cached across starts.
+- Source files stay read-only; QC never writes, moves, or deletes originals.
+
+## License
+
+AGPL-3.0 (GNU Affero General Public License v3.0). See [LICENSE](./LICENSE).
+
+Third-party components: `ffmpeg` / `ffprobe` ([FFmpeg](https://ffmpeg.org/)) embedded at build time via `go:embed`. They are distributed under their own licenses and are not shipped with this repository — provide them yourself.
