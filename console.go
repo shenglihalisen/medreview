@@ -2,6 +2,7 @@ package main
 
 import (
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 )
@@ -84,6 +85,15 @@ func (r *logRing) LastSeq() int64 {
 // 沿用 main.go 里 openBrowser 的那套候选顺序，并且**不能优先用 explorer** ——
 // 它会把路径里的特殊字符当通配符解析。
 func openPathWithShell(path string) {
+	// Linux/macOS：桌面自带 xdg-open / open；没有桌面环境时静默失败（日志仍在文件里）。
+	if runtime.GOOS != "windows" {
+		opener := "open"
+		if runtime.GOOS == "linux" {
+			opener = "xdg-open"
+		}
+		_ = exec.Command(opener, path).Start()
+		return
+	}
 	candidates := [][]string{
 		{"cmd", "/c", "start", "", path},
 		{"rundll32", "url.dll,FileProtocolHandler", path},
