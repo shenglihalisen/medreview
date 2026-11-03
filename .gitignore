@@ -51,3 +51,9 @@ tools/ffmpeg-linux/
 tools/imagemagick-linux/
 tools/ffmpeg-macos-arm64/
 tools/ffmpeg-macos-amd64/
+
+# ---- 本机调试脚本 / 一次性产物（不入库）----
+local/
+# ---- 通用日志与 Python 缓存 ----
+*.log
+__pycache__/
