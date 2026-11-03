@@ -128,6 +128,11 @@ html, body { margin: 0; padding: 0; background: var(--bg); }
 .dfold .dbar > i { display: block; height: 100%; background: var(--keep); transition: width .4s ease; }
 .dfold .dtot { font-size: 12.5px; color: var(--text-faint); flex-shrink: 0; }
 
+/* 自动刷新控件 */
+.dauto { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-dim); }
+.dauto input[type="checkbox"] { accent-color: var(--primary); }
+.dauto .dinput { padding: 2px 6px; font-size: 12.5px; }
+
 /* 目录进度：待审最多的目录，点一行直达该目录的待审文件 */
 .dftrow {
   display: grid; grid-template-columns: minmax(0,1fr) 130px 86px; gap: 14px;
@@ -300,6 +305,17 @@ select.dinput { cursor: pointer; }
       <span class="dsub">实时态势总览</span>
     </div>
     <span class="dspacer"></span>
+    <label class="dauto" title="实时推送之外，再定时拉一次全量做兜底；页面切到后台会自动暂停">
+      <input type="checkbox" id="auto-on" checked>
+      <span>自动刷新</span>
+      <select id="auto-sec" class="dinput">
+        <option value="5">5 秒</option>
+        <option value="10">10 秒</option>
+        <option value="30">30 秒</option>
+        <option value="60">60 秒</option>
+      </select>
+    </label>
+    <button class="dchipbtn" id="refresh-now" title="立即拉取一次全量数据">刷新</button>
     <div class="dconn"><span class="ddot" id="dot"></span><span id="updated">连接中…</span></div>
   </div>
   <div id="banner" class="dbanner" style="display:none"></div>
@@ -848,6 +864,8 @@ function connectEvents() {
 // loadFull 全量对账。正常情况下用不到（建连就有全量首帧）；
 // 只在增量早于首帧、或需要人工核对时调用。
 async function loadFull() {
+  if (loadingNow) return;              // 上一轮还没回来就别叠加请求
+  loadingNow = true;
   try {
     const r = await fetch('/api/dashboard', { cache: 'no-store' });
     if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -862,20 +880,57 @@ async function loadFull() {
   } catch (e) {
     $('dot').className = 'ddot err';
     $('updated').textContent = '同步失败，等待推送…';
+  } finally {
+    loadingNow = false;
   }
 }
 
-// 兜底对账：每 30 秒拉一次全量。
-// 频率从 1 秒降到 30 秒，是因为正常路径已经不靠拉取了 —— 这只是防
-// "浏览器休眠/网络抖动导致某条增量真的丢了"的保险，代价可以忽略。
-// 页面在后台时不做，回到前台立刻对账。
-setInterval(function () {
-  if (document.visibilityState === 'visible') loadFull();
-}, 30000);
+// ---------- 自动刷新（SSE 之外的兜底）----------
+// 实时靠 SSE；这里再加一个可调的定时全量对账，防"某条增量丢了/连接被代理掐了"。
+// 默认 30 秒，可在顶栏改 5/10/30/60 或直接关掉（关掉就纯靠推送）。
+// 页面在后台时不做，切回来立刻对账一次。
+var AUTO_KEY = 'mr_dash_auto_sec';
+var autoTimer = null;
+var loadingNow = false;
+
+function autoSeconds() {
+  var v = parseInt(localStorage.getItem(AUTO_KEY) || '30', 10);
+  if (isNaN(v) || v < 0) v = 30;
+  return v;
+}
+
+function applyAutoRefresh() {
+  if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
+  var sec = autoSeconds();
+  var sel = $('auto-sec'), chk = $('auto-on');
+  if (sel) sel.value = String(sec > 0 ? sec : 30);
+  if (chk) chk.checked = sec > 0;
+  if (sec > 0) {
+    autoTimer = setInterval(function () {
+      if (document.visibilityState === 'visible' && !loadingNow) loadFull();
+    }, sec * 1000);
+  }
+}
+
+function bindAutoRefresh() {
+  var sel = $('auto-sec'), chk = $('auto-on'), btn = $('refresh-now');
+  if (sel) sel.onchange = function () {
+    localStorage.setItem(AUTO_KEY, String(parseInt(sel.value, 10) || 30));
+    applyAutoRefresh();
+  };
+  if (chk) chk.onchange = function () {
+    localStorage.setItem(AUTO_KEY, chk.checked ? (parseInt(sel && sel.value, 10) || 30) : '0');
+    applyAutoRefresh();
+  };
+  if (btn) btn.onclick = function () { if (!loadingNow) loadFull(); };
+  applyAutoRefresh();
+}
 
 document.addEventListener('visibilitychange', function () {
   if (document.visibilityState === 'visible') { connectEvents(); loadFull(); }
 });
+
+bindAutoRefresh();
 
 // ---------- 交互绑定 ----------
 // 用事件委托而不是逐个绑：筛选 chip 是随渲染重画 innerHTML 的，
