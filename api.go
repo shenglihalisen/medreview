@@ -46,6 +46,11 @@ type Handler struct {
 	adminToken       string   // 管理口令
 	allowRemoteAdmin bool     // 允许远端管理操作
 
+	// --- 公网模式 ---
+	authCfg   authConfig
+	auth      *authState
+	loginUser string // 最近一次登录成功的用户名（仅日志/调试用）
+
 	// --- 网页控制台用（无黑窗版没有命令行窗口，地址/口令/日志只能在网页里看）---
 	logs        *logRing // 日志环形缓冲，给 /api/console 增量拉
 	reviewURL   string   // 本机审阅页地址
@@ -294,6 +299,8 @@ func (h *Handler) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /favicon.ico", h.handleFavicon)
 	mux.HandleFunc("GET /api/health", h.handleHealth)
+	mux.HandleFunc("POST /api/login", h.handleLogin)
+	mux.HandleFunc("POST /api/logout", h.handleLogout)
 	mux.HandleFunc("GET /api/events", h.hub.ServeHTTP)
 	mux.HandleFunc("GET /api/status", h.handleStatus)
 	mux.HandleFunc("GET /api/dashboard", h.handleDashboard)
@@ -374,7 +381,7 @@ func (h *Handler) Routes() http.Handler {
 		}
 		fsrv.ServeHTTP(w, r)
 	}))
-	return h.corsHandler(v1Alias(mux))
+	return h.corsHandler(h.authWrap(v1Alias(mux)))
 }
 
 // corsHandler 只对「本机 / 局域网 / 无 Origin」的请求放开跨域。
@@ -393,6 +400,7 @@ func (hn *Handler) corsHandler(h http.Handler) http.Handler {
 		//  · no-referrer：下载页地址带 ?t=口令，跳转下载时不要把口令从 Referer 漏出去
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
+		hn.securityHeaders(w, r)
 
 		if origin := r.Header.Get("Origin"); origin != "" {
 			if hn.allowedOrigin(origin) {
@@ -482,6 +490,10 @@ func (h *Handler) requireLoopback(w http.ResponseWriter, r *http.Request) bool {
 	}
 	// 远端管理：默认关；开了且配了管理口令时，允许带 Bearer 的远端调用
 	// （前后端分离后，前端可能在另一台机器上，需要能选目录/重扫）。
+	// 公网模式：登录用户可以使用目录枚举/重扫（他本来就是被授权的运维者）
+	if h.authEnabled() && h.sessionUser(r) != "" {
+		return true
+	}
 	if h.allowRemoteAdmin && h.adminToken != "" {
 		if t := bearerToken(r); len(t) == len(h.adminToken) &&
 			subtle.ConstantTimeCompare([]byte(t), []byte(h.adminToken)) == 1 {
@@ -514,6 +526,10 @@ func (h *Handler) requireLoopback(w http.ResponseWriter, r *http.Request) bool {
 // 不能直接读字段。
 func (h *Handler) canDownload(r *http.Request) bool {
 	if h.noToken {
+		return true
+	}
+	// 公网模式：已登录用户视为有下载权限（不再要求第二个口令）
+	if h.authEnabled() && h.sessionUser(r) != "" {
 		return true
 	}
 	tok := h.tokenOf()
@@ -910,6 +926,12 @@ func (h *Handler) setToken(t string) {
 	h.mu.Lock()
 	h.dlToken = t
 	h.mu.Unlock()
+}
+
+func writeJSONStatus(w http.ResponseWriter, code int, v any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(v)
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

@@ -14,7 +14,8 @@
 | 打包下载 / 导出 | `/api/zip`、`/api/export`、`/api/copy` | 下载口令（Bearer / cookie / `?t=`） |
 | 目录枚举 / 改根目录 | `/api/browse`、`/api/scan` | 仅回环，或 `-allow-remote-admin` + 管理口令 |
 
-结论：**公网部署必须在前置代理上加身份认证**，否则等于公开素材。仅靠"下载口令"保护不了浏览与标记。
+结论：**公网部署必须有一层身份认证**——要么用本项目内置的 `-public` 认证（见 3.5），
+要么交给前置反向代理（第 3/5 节）。仅靠"下载口令"保护不了浏览与标记。
 
 ---
 
@@ -92,6 +93,39 @@ server {
 > 同域不用配 `-cors`。
 
 ---
+
+## 3.5 内置认证模式（不必上反向代理）
+
+v1.3 起自带一层"够用"的认证，适合"就要一个能挂公网的独立服务"：
+
+```bash
+medreview -public \
+  -auth alice:'你的密码' \
+  -session-key "$(openssl rand -hex 32)" \
+  -audit-log /data/audit.jsonl \
+  -tls-cert /etc/letsencrypt/live/review.example.com/fullchain.pem \
+  -tls-key  /etc/letsencrypt/live/review.example.com/privkey.pem \
+  -root /media -db /data/medreview.db
+```
+
+行为：
+
+| 项 | 说明 |
+| --- | --- |
+| 保护范围 | 所有页面与 `/api/*` 都要求登录；只放行 `/login.html`、`/api/login`、`/api/health` 和图标样式 |
+| 会话 | HMAC-SHA256 签名的 Cookie（HttpOnly / SameSite=Lax；给了 TLS 就加 Secure），12 小时 |
+| 登录限流 | 同一 IP 15 分钟内失败 5 次 → 429 |
+| CSRF | 浏览器发起的写操作必须同源（Origin 校验；curl 等无 Origin 的客户端不受影响） |
+| 权限 | 已登录 = 有下载权限、可用目录枚举/重扫（不用再配 `-admin-token`） |
+| 审计 | `-audit-log` 追加 JSONL：时间、IP、用户、动作、结果、UA |
+
+多账号：`-auth-file users.json`，格式 `{"users":{"alice":"$2a$..."}}`，哈希用
+`htpasswd -bnBC 10 "" '密码' | tr -d ':\n'` 或 `python -c "import bcrypt;print(bcrypt.hashpw(b'密码',bcrypt.gensalt(10)).decode())"`。
+
+**局限（想清楚再上）**：进程内计数（重启清零）；没有 2FA / 密码找回 / 用户管理界面；
+会话密钥不指定就每次启动随机（重启要重新登录）。需要这些能力时，还是上 Authelia / OAuth2-Proxy。
+
+**强烈建议**：即使有内置认证，也把 `-public` 与 `-tls-cert/-tls-key` 一起用，别用明文 HTTP 传密码。
 
 ## 4. 前后端不同域（前端放 CDN / 另一台机器）
 

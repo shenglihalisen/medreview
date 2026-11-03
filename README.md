@@ -123,7 +123,8 @@ medreview -api-only -addr 0.0.0.0:8080 -root /media -db /data/medreview.db
 - **远端管理**：异机选目录/重扫需要 `-allow-remote-admin -admin-token <随机串>`，默认关闭。
 - **跨源下载**：用 `Authorization: Bearer <下载口令>`（跨源 cookie 不可靠）。
 - **Docker**：`docker build -t medreview .`，素材挂到 `/media`（只读）、数据挂 `/data`。
-- ⚠️ **公网部署前必读** [`docs/design/public-deployment.md`](docs/design/public-deployment.md)：媒体接口无鉴权，必须由反向代理做身份认证。
+- **公网模式（内置认证）**：`-public -auth 用户名:密码` 启用登录页 + 签名会话 + 登录限流 + CSRF 校验 + 审计日志（JSONL）；配合 `-tls-cert/-tls-key` 可直接跑 HTTPS。不需要反代也能挡住匿名访问。
+- ⚠️ **公网部署前必读** [`docs/design/public-deployment.md`](docs/design/public-deployment.md)：媒体接口本身无鉴权，必须有认证层（内置 `-public` 或反向代理）。
 
 ## 3. 架构与源码结构
 
@@ -450,7 +451,8 @@ medreview -api-only -addr 0.0.0.0:8080 -root /media -db /data/medreview.db
 - **Remote admin**: choosing folders / rescanning from another machine needs `-allow-remote-admin -admin-token <random>`; off by default.
 - **Cross-origin downloads**: use `Authorization: Bearer <download-token>` (cookies are unreliable cross-origin).
 - **Docker**: `docker build -t medreview .`; mount media read-only at `/media` and data at `/data`.
-- ⚠️ **Read [`docs/design/public-deployment.md`](docs/design/public-deployment.md) before exposing it to the internet**: media endpoints are unauthenticated and must be protected by a reverse-proxy auth layer.
+- **Public mode (built-in auth)**: `-public -auth user:password` enables a login page, signed sessions, login rate limiting, CSRF checks, and a JSONL audit log; add `-tls-cert/-tls-key` to serve HTTPS directly. Anonymous access is blocked without a reverse proxy.
+- ⚠️ **Read [`docs/design/public-deployment.md`](docs/design/public-deployment.md) before exposing it to the internet**: media endpoints are unauthenticated by design, so some auth layer (built-in `-public` or a reverse proxy) is mandatory.
 
 ## 3. Architecture and source layout
 
