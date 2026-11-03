@@ -175,6 +175,15 @@ func newApp(cfg appConfig, logs *logRing, logPath string) (*app, error) {
 		// 「有没有本地窗口」：gui / wails 版都有，console 版只有黑窗口
 		gui: buildMode != "console",
 	}
+	// 自动发现：数据库同目录有 users.json 就启用登录（配合 -setup 使用，
+	// 日常启动不需要任何认证参数）
+	if a.cfg.authFile == "" {
+		if p := defaultUsersPath(a.cfg.dbPath); fileExists(p) {
+			a.cfg.authFile = p
+			log.Printf("发现 %s，自动启用登录", p)
+		}
+	}
+
 	authCfg, err := loadAuthConfig(a.cfg.authSingle, a.cfg.authFile, a.cfg.sessionKey, a.cfg.auditPath, a.cfg.admins, a.cfg.tlsCert != "" || a.cfg.publicMode)
 	if err != nil {
 		return nil, err

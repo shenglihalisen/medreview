@@ -128,6 +128,7 @@ medreview -api-only -addr 0.0.0.0:8080 -root /media -db /data/medreview.db
 - **账号怎么改密码**：登录后进 `/admin.html`，底部「账号」块填当前密码 + 新密码（≥8 位）即可，无需重启；改完下次登录生效。
 - **超管**：`-admin alice,bob`（或在 `users.json` 的 `"admins":["alice"]` 里写）指定超管。超管在仪表盘「账号 → 用户管理」里可以：新增用户、重置任意用户密码、设/撤超管、删除用户。保护规则：不能删自己、最后一个超管不能被删除或降级；所有操作写入审计日志。超管身份**每次请求现查**，撤销立即生效。
 - **单超管 + 每次启动输密码**：`-admin-user demo` 会在启动时询问该账号密码（输入不回显），只保留这一个超管、密码只存在内存里（不写 users.json）。适合"就一个管理员"的场景：`medreview -public -admin-user admin`，启动时输密码即可。此模式下不提供用户管理界面（没有 users 文件）；需要管用户时再配合 `-auth-file`。
+- **首次配置向导（推荐，无需记参数）**：运行一次 `medreview -setup`，会依次问「超管数量 → 每个账号 → 密码（不回显、输两次）」，写入**数据库同目录的 `users.json`**；之后正常启动即可——程序发现这个文件就自动启用登录。`start.bat` / `start.sh` 已经把这一问接进流程：问完 GPU 会问超管数量，填 >0 就自动跑向导。要关闭登录就删掉该 `users.json`。
 - ⚠️ **公网部署前必读** [`docs/design/public-deployment.md`](docs/design/public-deployment.md)：媒体接口本身无鉴权，必须有认证层（内置 `-public` 或反向代理）。
 
 ## 3. 架构与源码结构
@@ -459,6 +460,7 @@ medreview -api-only -addr 0.0.0.0:8080 -root /media -db /data/medreview.db
 - **Accounts**: a single account is just `-auth user:password`. For multiple accounts, run `medreview -hash-pass -` (reads the password from stdin so it stays out of shell history), put the bcrypt hashes into `users.json` as `{"users":{"alice":"$2a$10$..."}}`, and start with `-auth-file users.json`. Changes require a restart; pin `-session-key` to keep sessions valid across restarts. When started with `-auth-file`, signed-in users can change their own password under **Dashboard → Account** (old password verified, `users.json` rewritten atomically, audit logged).
 - **Super admin**: pass `-admin alice,bob` (or put `"admins":["alice"]` in `users.json`). Super admins get a **Users** panel in the dashboard to create users, reset any password, promote/demote admins, and delete users. Guard rails: you cannot delete yourself, and the last admin cannot be deleted or demoted. Every action is audit-logged, and admin status is checked per request so revocation applies immediately.
 - **Single admin with a startup prompt**: `-admin-user demo` asks for that account's password at startup (input is not echoed), keeps exactly one super admin, and holds the password in memory only (never written to `users.json`). For a "just one administrator" deployment: `medreview -public -admin-user admin`. This mode has no user-management panel (there is no users file); combine with `-auth-file` if you need to manage users.
+- **First-run wizard (recommended, no flags to remember)**: run `medreview -setup` once. It asks for the number of admins, then each account and password (not echoed, entered twice), and writes `users.json` **next to the database**. Normal starts then pick it up automatically and require login. `start.bat` / `start.sh` already ask for the admin count right after the GPU question and run the wizard when it is greater than zero. Delete that `users.json` to turn login off again.
 - ⚠️ **Read [`docs/design/public-deployment.md`](docs/design/public-deployment.md) before exposing it to the internet**: media endpoints are unauthenticated by design, so some auth layer (built-in `-public` or a reverse proxy) is mandatory.
 
 ## 3. Architecture and source layout
