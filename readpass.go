@@ -14,16 +14,19 @@ import (
 	"strings"
 )
 
+// 共享一个 Scanner：每次 new 一个会各自缓冲，第二次读就 EOF
+// （向导要连续问"数量→账号→密码…"，踩过这个坑）。
+var stdinScanner = bufio.NewScanner(os.Stdin)
+
 // readLine 读一行（去掉行尾换行）。
 func readLine() (string, error) {
-	sc := bufio.NewScanner(os.Stdin)
-	if !sc.Scan() {
-		if err := sc.Err(); err != nil {
+	if !stdinScanner.Scan() {
+		if err := stdinScanner.Err(); err != nil {
 			return "", err
 		}
 		return "", fmt.Errorf("没有读到输入")
 	}
-	return strings.TrimRight(sc.Text(), "\r\n"), nil
+	return strings.TrimRight(stdinScanner.Text(), "\r\n"), nil
 }
 
 // promptPassword 打印提示并读密码（终端下不回显）。

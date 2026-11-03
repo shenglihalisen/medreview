@@ -48,6 +48,19 @@ echo.
 
 set /p "GPUIN=GPU speedup: transcode encoder (nvenc/qsv/amf) + QC decode? (Y=yes/n=no, Enter=yes): "
 if /i "!GPUIN!"=="n" set "GPUQC=n"
+
+rem ====== [5] 超管数量（0 = 不启用登录；只适合受信任局域网）======
+set /p "ADMINS=Admin accounts for login (0=none, Enter=0): "
+if "!ADMINS!"=="" set "ADMINS=0"
+if not "!ADMINS!"=="0" (
+  set "MEDREVIEW_ADMINS=!ADMINS!"
+  echo.
+  echo --- 配置超管账号（密码输入不回显）---
+  medreview.exe -setup -db medreview.db
+  if errorlevel 1 (
+    echo [WARN] super admin setup failed - continuing WITHOUT login.
+  )
+)
 echo.
 
 :check
