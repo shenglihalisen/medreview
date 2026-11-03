@@ -133,7 +133,8 @@ gui_wails.go         WebView2 本地窗口（构建 tag: wails）
 mode_*.go            构建模式常量（console / gui / wails）
 web/                 审阅页与下载页前端（go:embed 进二进制）
 ui/                  WebView2 本地控制台窗口界面（go:embed 进二进制）
-tools/               build_single.py（单文件化）、make_lnk.py（生成快捷方式）；tools/ffmpeg/ 为内嵌源（不入库）
+tools/               build_single.py（单文件化）、make_lnk.py（生成快捷方式）；tools/ffmpeg*/ 为内嵌源（不入库）
+local/               本机调试脚本与一次性产物（不入库）
 _verify/             验收脚本（见第 8 节）
 build-linux.sh       Linux 构建脚本（默认单文件版；--slim 精简版）
 build-macos.sh       macOS 构建脚本（arm64 / amd64 / universal）
@@ -442,7 +443,8 @@ gui_wails.go         WebView2 desktop window (build tag: wails)
 mode_*.go            Build-mode constants (console / gui / wails)
 web/                 Review and download page frontends (go:embed into the binary)
 ui/                  WebView2 desktop console UI (go:embed into the binary)
-tools/               build_single.py (single-file build), make_lnk.py (shortcut creation); tools/ffmpeg/ is the embed source (not tracked)
+tools/               build_single.py (single-file build), make_lnk.py (shortcut creation); tools/ffmpeg*/ are embed sources (not tracked)
+local/               local debug scripts and scratch artifacts (not tracked)
 _verify/             Acceptance scripts (see section 8)
 build-linux.sh       Linux build script (single-file by default; --slim for a small build)
 build-macos.sh       macOS build script (arm64 / amd64 / universal)
