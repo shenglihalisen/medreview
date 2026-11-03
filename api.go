@@ -301,6 +301,8 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /api/health", h.handleHealth)
 	mux.HandleFunc("POST /api/login", h.handleLogin)
 	mux.HandleFunc("POST /api/logout", h.handleLogout)
+	mux.HandleFunc("GET /api/auth/me", h.handleAuthMe)
+	mux.HandleFunc("POST /api/auth/password", h.handleChangePassword)
 	mux.HandleFunc("GET /api/events", h.hub.ServeHTTP)
 	mux.HandleFunc("GET /api/status", h.handleStatus)
 	mux.HandleFunc("GET /api/dashboard", h.handleDashboard)
