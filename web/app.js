@@ -75,10 +75,38 @@
   //   ① 页面是从本地文件打开的（file://，例如离线演示页）
   //   ② 页面由预览面板以 /static-html/... 提供
   // 其余一律用相对路径 —— 手机用内网 IP 访问、服务换端口，都能自动正确。
-  var API_BASE = (DEMO && DEMO.apiBase !== undefined) ? DEMO.apiBase
-    : ((location.protocol === "file:" || /^\/static-html\//.test(location.pathname))
-      ? "http://127.0.0.1:8080"
-      : "");
+  // 前后端分离：前端可以部署在任意机器/域名，后端地址按下面的优先级解析
+  //   ① URL 参数 ?api=http://nas:8080（会记进 localStorage，之后不用再带）
+  //   ② localStorage["medreview.api"]（"服务器地址…"里设置过）
+  //   ③ 离线演示页的 DEMO.apiBase
+  //   ④ file:// 或预览面板（/static-html/…）→ 回落到本机 8080
+  //   ⑤ 其余（同源部署）→ 空串，走相对路径
+  var API_BASE = (function () {
+    function clean(v) { return String(v || "").trim().replace(/\/+$/, ""); }
+    try {
+      var q = new URLSearchParams(location.search).get("api");
+      if (q) {
+        localStorage.setItem("medreview.api", clean(q));
+        return clean(q);
+      }
+    } catch (e) {}
+    try {
+      var saved = localStorage.getItem("medreview.api");
+      if (saved) return clean(saved);
+    } catch (e) {}
+    if (DEMO && DEMO.apiBase !== undefined) return DEMO.apiBase;
+    if (location.protocol === "file:" || /^\/static-html\//.test(location.pathname)) {
+      return "http://127.0.0.1:8080";
+    }
+    return "";
+  })();
+
+  // 跨源时 fetch 要带 Authorization 才能过下载鉴权；同源仍然走 cookie。
+  function authHeaders(extra) {
+    var h = extra || {};
+    if (API_BASE && S.token) h["Authorization"] = "Bearer " + S.token;
+    return h;
+  }
 
   function U(p) {
     // 离线演示页把 /api/media?id=N 映射到同目录 demo_img/ 下的真实图片
@@ -789,7 +817,7 @@
   function loadMore() {
     if (S.loading || !S.hasMore) return Promise.resolve();
     S.loading = true;
-    var url = "/api/files?folder=" + S.folderId + "&limit=" + S.page + "&filter=" + S.filter;
+    var url = U("/api/files?folder=" + S.folderId) + "&limit=" + S.page + "&filter=" + S.filter;
     // 父目录的文件只在第一页带出来（服务端也只在没翻页时追加），避免重复
     if (S.cursorId === 0 && S.withParent) url += "&withParent=1";
     if (S.cursorId > 0) url += "&afterName=" + encodeURIComponent(S.cursorName) + "&afterId=" + S.cursorId;
@@ -1812,7 +1840,7 @@
     var fid = S.folderId;
     var acc = [], afterName = "", afterId = 0;
     var page = function () {
-      var p = "/api/files?folder=" + fid + "&limit=300&filter=pending";
+      var p = U("/api/files?folder=" + fid) + "&limit=300&filter=pending";
       if (afterId > 0) p += "&afterName=" + encodeURIComponent(afterName) + "&afterId=" + afterId;
       return api(p).then(function (d) {
         var arr = d.files || [];
@@ -2194,6 +2222,21 @@
     if ($("btn-folder-reject")) $("btn-folder-reject").onclick = function () { folderDecide(2); };
     $("btn-root").onclick = openRootModal;
     $("btn-help").onclick = openHelp;
+    // 服务器地址：前后端分离时在前端页面上改后端地址（写 localStorage 后重载）
+    var srvBtn = $("btn-server");
+    if (srvBtn) {
+      srvBtn.onclick = function () {
+        askText("服务器地址", "后端地址；留空 = 同源。例：http://192.168.1.9:8080",
+          API_BASE || "", function (v) {
+            v = String(v || "").trim().replace(/\/+$/, "");
+            try {
+              if (v) localStorage.setItem("medreview.api", v);
+              else localStorage.removeItem("medreview.api");
+            } catch (e) {}
+            location.reload();
+          });
+      };
+    }
     if ($("btn-quality")) {
       $("btn-quality").onclick = function () {
         S.quality = S.quality === "orig" ? "preview" : "orig";
@@ -2225,7 +2268,7 @@
       if (S.claimedBy && S.claimedBy !== S.user) { toast("该目录已被 " + S.claimedBy + " 认领"); return; }
       var releasing = (S.claimedBy === S.user);
       el.claimBtn.disabled = true;
-      var url = releasing ? "/api/claim/release" : "/api/claim";
+      var url = U(releasing ? "/api/claim/release" : "/api/claim");
       var body = releasing ? { folderId: S.folderId }
         : { folderId: S.folderId, user: S.user };
       api(url, {
@@ -2910,6 +2953,44 @@
   }
 
   function closeModal() { el.modal.classList.remove("on"); }
+
+  // askText：应用内文本输入弹窗。不用 window.prompt —— 移动端样式丑、会阻塞
+  // 主线程，而且安卓 WebView 里经常被禁。
+  function askText(title, hint, value, onOk) {
+    el.modalTitle.textContent = title;
+    el.modalBody.innerHTML = "";
+    var d = document.createElement("div");
+    d.className = "hint";
+    d.style.fontSize = "13px";
+    d.textContent = hint;
+    var row = document.createElement("div");
+    row.className = "modal-foot";
+    var input = document.createElement("input");
+    input.type = "text";
+    input.value = value || "";
+    input.style.flex = "1";
+    input.style.minWidth = "220px";
+    input.style.padding = "6px 8px";
+    input.style.borderRadius = "6px";
+    input.style.border = "1px solid #3a4a5e";
+    input.style.background = "#141b24";
+    input.style.color = "inherit";
+    var no = document.createElement("button");
+    no.className = "btn";
+    no.textContent = "取消";
+    no.onclick = closeModal;
+    var yes = document.createElement("button");
+    yes.className = "btn primary";
+    yes.textContent = "确定";
+    yes.onclick = function () { closeModal(); onOk(input.value); };
+    row.appendChild(input);
+    row.appendChild(no);
+    row.appendChild(yes);
+    el.modalBody.appendChild(d);
+    el.modalBody.appendChild(row);
+    el.modal.classList.add("on");
+    setTimeout(function () { input.focus(); input.select(); }, 30);
+  }
 
   function confirmDo(msg, fn) {
     el.modalTitle.textContent = "确认";

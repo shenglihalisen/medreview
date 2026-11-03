@@ -49,6 +49,9 @@
   white-space: nowrap;
 }
 </style>
+  <link rel="manifest" href="manifest.webmanifest">
+  <meta name="theme-color" content="#0f1419">
+  <link rel="apple-touch-icon" href="icon-192.png">
 </head>
 <body>
 <div id="app">
@@ -82,6 +85,7 @@
         <button class="btn danger wide" id="btn-folder-reject" title="把本目录（不含子目录）的全部文件一次性标为不保留；会覆盖已有标记">本目录全部不保留</button>
         <button class="btn danger wide" id="btn-clear-folder" title="清空这一个目录里全部文件的标记；不含子目录，不可撤销">清空本目录标记…</button>
         <button class="btn" id="btn-root">选择素材目录</button>
+        <button class="btn" id="btn-server" title="前后端分离时，在这里填后端地址（留空 = 同源）">服务器地址…</button>
       </div>
       <button class="btn" id="btn-help">说明</button>
       <button class="btn" id="btn-more" title="更多操作">⋯</button>

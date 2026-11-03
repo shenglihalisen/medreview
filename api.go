@@ -38,6 +38,14 @@ type Handler struct {
 	// 需要分享时用一次性 share token（见 handleShareToken）。
 	allowQueryToken bool
 
+	// --- 前后端分离（2026-11-03）---
+	apiOnly          bool     // 只出 API，不挂静态前端
+	webRoot          string   // 外置前端目录
+	corsOrigins      []string // 额外允许的来源
+	corsLAN          bool     // 放行私有网段来源
+	adminToken       string   // 管理口令
+	allowRemoteAdmin bool     // 允许远端管理操作
+
 	// --- 网页控制台用（无黑窗版没有命令行窗口，地址/口令/日志只能在网页里看）---
 	logs        *logRing // 日志环形缓冲，给 /api/console 增量拉
 	reviewURL   string   // 本机审阅页地址
@@ -196,7 +204,7 @@ func (h *Handler) handleQCThresholdsGet(w http.ResponseWriter, r *http.Request) 
 // handleQCThresholdsSet 应用新的判定阈值：生效 + 存 meta + 按新阈值全量重跑。
 // 改的是**全局**检测行为，与「换素材目录」同级敏感 → 只允许本机（requireLoopback）。
 func (h *Handler) handleQCThresholdsSet(w http.ResponseWriter, r *http.Request) {
-	if !requireLoopback(w, r) {
+	if !h.requireLoopback(w, r) {
 		return
 	}
 	if h.qc == nil {
@@ -285,6 +293,7 @@ func (h *Handler) invalidateTotals() {
 func (h *Handler) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /favicon.ico", h.handleFavicon)
+	mux.HandleFunc("GET /api/health", h.handleHealth)
 	mux.HandleFunc("GET /api/events", h.hub.ServeHTTP)
 	mux.HandleFunc("GET /api/status", h.handleStatus)
 	mux.HandleFunc("GET /api/dashboard", h.handleDashboard)
@@ -333,8 +342,18 @@ func (h *Handler) Routes() http.Handler {
 	// 注意：Go 的 ServeMux 里 "/"-结尾的模式是前缀匹配，
 	// 所以不能写成 "GET /"（那会把所有 GET 请求都吃掉）。
 	// 这里只用 "/" 兜底静态资源，根路径单独重定向。
-	fsrv := http.FileServer(http.FS(webFS))
+	var staticFS fs.FS = webFS
+	if h.webRoot != "" {
+		staticFS = os.DirFS(h.webRoot)
+	}
+	fsrv := http.FileServer(http.FS(staticFS))
 	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if h.apiOnly {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte(`{"error":"api-only：本服务不提供前端，请把 web/ 部署在别处","api":1}`))
+			return
+		}
 		if r.URL.Path == "/" {
 			http.Redirect(w, r, "/home.html", http.StatusFound)
 			return
@@ -355,7 +374,7 @@ func (h *Handler) Routes() http.Handler {
 		}
 		fsrv.ServeHTTP(w, r)
 	}))
-	return corsHandler(mux)
+	return h.corsHandler(v1Alias(mux))
 }
 
 // corsHandler 只对「本机 / 局域网 / 无 Origin」的请求放开跨域。
@@ -367,7 +386,7 @@ func (h *Handler) Routes() http.Handler {
 // 仍然放开本地来源：WorkBuddy 的「应用内预览面板」是另一个端口（如 :31976）渲染页面的，
 // 那时页面里的 /api/* 要跨端口打回本服务，Origin 会是 http://127.0.0.1:31976 —— 放行。
 // 非浏览器的直连请求（curl / 验收脚本 / 预览面板的静态抓取）不带 Origin，同样放行。
-func corsHandler(h http.Handler) http.Handler {
+func (hn *Handler) corsHandler(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// 安全响应头：不管来源是谁都给
 		//  · nosniff：/api/media 吐的是用户素材，绝不能被浏览器嗅探成 HTML 执行
@@ -376,11 +395,11 @@ func corsHandler(h http.Handler) http.Handler {
 		w.Header().Set("Referrer-Policy", "no-referrer")
 
 		if origin := r.Header.Get("Origin"); origin != "" {
-			if localOrigin(origin) {
+			if hn.allowedOrigin(origin) {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 				w.Header().Set("Vary", "Origin")
 				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-User")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-User, Authorization")
 				w.Header().Set("Access-Control-Max-Age", "86400")
 			}
 			// 不认识的来源：一个 CORS 头都不给，浏览器会直接把跨站请求挡掉
@@ -457,11 +476,19 @@ func isLoopback(r *http.Request) bool {
 }
 
 // requireLoopback 局域网请求统一拒绝，给出看得懂的中文提示。
-func requireLoopback(w http.ResponseWriter, r *http.Request) bool {
+func (h *Handler) requireLoopback(w http.ResponseWriter, r *http.Request) bool {
 	if isLoopback(r) {
 		return true
 	}
-	http.Error(w, "选择素材目录 / 重新扫描是本机操作，请在运行服务的这台电脑上执行", http.StatusForbidden)
+	// 远端管理：默认关；开了且配了管理口令时，允许带 Bearer 的远端调用
+	// （前后端分离后，前端可能在另一台机器上，需要能选目录/重扫）。
+	if h.allowRemoteAdmin && h.adminToken != "" {
+		if t := bearerToken(r); len(t) == len(h.adminToken) &&
+			subtle.ConstantTimeCompare([]byte(t), []byte(h.adminToken)) == 1 {
+			return true
+		}
+	}
+	http.Error(w, "选择素材目录 / 重新扫描是本机操作，请在运行服务的这台电脑上执行（或配置 -allow-remote-admin + -admin-token）", http.StatusForbidden)
 	return false
 }
 
@@ -490,6 +517,10 @@ func (h *Handler) canDownload(r *http.Request) bool {
 		return true
 	}
 	tok := h.tokenOf()
+	if t := bearerToken(r); t != "" && len(t) == len(tok) &&
+		subtle.ConstantTimeCompare([]byte(t), []byte(tok)) == 1 {
+		return true
+	}
 	// 常量时间比较，避免通过响应时间逐字节猜口令。
 	// 长度不等也走同一个分支（先比长度只是为了尽早拒绝，不构成时序泄漏：
 	// 口令长度不是秘密，且主口令是定长随机生成的）。
@@ -520,6 +551,10 @@ func (h *Handler) masterAuthorized(r *http.Request) bool {
 		return true
 	}
 	tok := h.tokenOf()
+	if t := bearerToken(r); t != "" && len(t) == len(tok) &&
+		subtle.ConstantTimeCompare([]byte(t), []byte(tok)) == 1 {
+		return true
+	}
 	if c, err := r.Cookie("mr_dl"); err == nil && len(c.Value) == len(tok) &&
 		subtle.ConstantTimeCompare([]byte(c.Value), []byte(tok)) == 1 {
 		return true
@@ -1032,7 +1067,7 @@ func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleScan(w http.ResponseWriter, r *http.Request) {
-	if !requireLoopback(w, r) {
+	if !h.requireLoopback(w, r) {
 		return
 	}
 	var req struct {
@@ -1070,7 +1105,7 @@ func (h *Handler) handleScan(w http.ResponseWriter, r *http.Request) {
 
 // handleBrowse 让页面在服务端侧挑选素材根目录（浏览器拿不到本机绝对路径）。
 func (h *Handler) handleBrowse(w http.ResponseWriter, r *http.Request) {
-	if !requireLoopback(w, r) {
+	if !h.requireLoopback(w, r) {
 		return
 	}
 	p := r.URL.Query().Get("path")
@@ -1567,3 +1602,72 @@ func urlEscape(s string) string {
 
 // webFS 由 main.go 通过 go:embed 注入
 var webFS fs.FS
+
+
+// handleHealth 健康检查：前端（可能部署在另一台机器/另一个域名）用它探测后端。
+// **故意允许任意来源读取** —— 只返回版本号，不含素材、路径、口令等任何敏感信息；
+// 不这样设计的话，首次配置"服务器地址"会永远卡在 CORS 上，用户根本走不下去。
+func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
+	// 回显 Origin（等价于放开任意来源，但不写通配 *：项目有一条"禁止 ACAO:*"的
+	// 源码守卫，通配一旦出现在代码里就可能被复制到别的接口去）。
+	if o := r.Header.Get("Origin"); o != "" {
+		w.Header().Set("Access-Control-Allow-Origin", o)
+		w.Header().Set("Vary", "Origin")
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, map[string]any{"ok": true, "api": 1, "name": "medreview"})
+}
+
+// v1Alias 把 /api/v1/xxx 改写成 /api/xxx，给未来的破坏性变更留出版本位。
+func v1Alias(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/v1/") {
+			r.URL.Path = "/api/" + strings.TrimPrefix(r.URL.Path, "/api/v1/")
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// allowedOrigin 判断是否放行某个跨源来源：
+//  1. 本机来源（预览面板、localhost）——原有行为；
+//  2. 私有网段来源（10/8、172.16/12、192.168/16）——前后端分离最常见的部署，
+//     可用 -cors-lan=false 关掉；
+//  3. -cors 显式列出的来源（公网域名/端口）。
+func (h *Handler) allowedOrigin(origin string) bool {
+	if localOrigin(origin) {
+		return true
+	}
+	if h.corsLAN && privateLANOrigin(origin) {
+		return true
+	}
+	o := strings.TrimRight(origin, "/")
+	for _, want := range h.corsOrigins {
+		if strings.EqualFold(strings.TrimRight(want, "/"), o) {
+			return true
+		}
+	}
+	return false
+}
+
+// privateLANOrigin 判断 origin 的主机是否是私有网段 IP（RFC1918 / ULA）。
+func privateLANOrigin(origin string) bool {
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(u.Hostname())
+	if ip == nil {
+		return false
+	}
+	return ip.IsPrivate()
+}
+
+// bearerToken 取 Authorization: Bearer <token>。跨源场景首选 —— cookie 在
+// SameSite 限制下不可靠，而 URL 上的 ?t= 又太容易泄漏。
+func bearerToken(r *http.Request) string {
+	h := r.Header.Get("Authorization")
+	if len(h) > 7 && strings.EqualFold(h[:7], "Bearer ") {
+		return strings.TrimSpace(h[7:])
+	}
+	return ""
+}

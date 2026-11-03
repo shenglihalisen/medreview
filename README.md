@@ -108,6 +108,23 @@ Go 原生支持 darwin，仓库可直接交叉编译（Apple Silicon / Intel 均
 - **硬件加速**：macOS 暂未接入（VideoToolbox 未支持），一律 CPU。
 - **无桌面窗口**：headless 形态，启动后从日志里取访问地址。
 
+### 2.5 前后端分离 / 容器
+
+```bash
+# 后端只出 API（前端可部署在任意机器）
+medreview -api-only -addr 0.0.0.0:8080 -root /media -db /data/medreview.db
+
+# 前端：把 web/ 放到任意静态服务器；页面里点「服务器地址…」填后端地址，
+# 或首次用 ?api=http://nas:8080 打开（地址会记在 localStorage）
+```
+
+- **CORS 默认策略**：放行本机来源 + 私有网段（10/8、172.16/12、192.168/16）；公网域名必须 `-cors https://your.domain` 显式列出，`-cors-lan=false` 可关掉私网放行。
+- **同源部署**（推荐）：反向代理把 `/` 和 `/api` 都指向同一个后端，免 CORS，还能在代理层加认证。
+- **远端管理**：异机选目录/重扫需要 `-allow-remote-admin -admin-token <随机串>`，默认关闭。
+- **跨源下载**：用 `Authorization: Bearer <下载口令>`（跨源 cookie 不可靠）。
+- **Docker**：`docker build -t medreview .`，素材挂到 `/media`（只读）、数据挂 `/data`。
+- ⚠️ **公网部署前必读** [`docs/design/public-deployment.md`](docs/design/public-deployment.md)：媒体接口无鉴权，必须由反向代理做身份认证。
+
 ## 3. 架构与源码结构
 
 单进程 Go 服务 + 原生前端，无外部服务依赖（数据库为嵌入式 SQLite，通过纯 Go 驱动 `modernc.org/sqlite`）。
@@ -417,6 +434,23 @@ Go supports darwin natively; the repository cross-compiles for both Apple Silico
 - **Unsigned**: the first launch is blocked by Gatekeeper. Allow it in System Settings > Privacy & Security, or run `xattr -d com.apple.quarantine ./medreview`.
 - **Hardware acceleration**: not wired up for macOS (VideoToolbox unsupported); CPU only.
 - **No desktop window**: headless; read the address from the log.
+
+### 2.5 Split frontend/backend and containers
+
+```bash
+# API-only backend (the frontend can live on any machine)
+medreview -api-only -addr 0.0.0.0:8080 -root /media -db /data/medreview.db
+
+# Frontend: serve web/ from any static host; click "Server address..." in the UI,
+# or open once with ?api=http://nas:8080 (the address is remembered in localStorage).
+```
+
+- **Default CORS policy**: local origins plus private ranges (10/8, 172.16/12, 192.168/16). Public domains must be listed explicitly with `-cors https://your.domain`; `-cors-lan=false` disables the private-range allowance.
+- **Same-origin (recommended)**: put a reverse proxy in front, routing both `/` and `/api` to the backend - no CORS, and you can add authentication at the proxy.
+- **Remote admin**: choosing folders / rescanning from another machine needs `-allow-remote-admin -admin-token <random>`; off by default.
+- **Cross-origin downloads**: use `Authorization: Bearer <download-token>` (cookies are unreliable cross-origin).
+- **Docker**: `docker build -t medreview .`; mount media read-only at `/media` and data at `/data`.
+- ⚠️ **Read [`docs/design/public-deployment.md`](docs/design/public-deployment.md) before exposing it to the internet**: media endpoints are unauthenticated and must be protected by a reverse-proxy auth layer.
 
 ## 3. Architecture and source layout
 

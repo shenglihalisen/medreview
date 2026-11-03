@@ -257,8 +257,16 @@ def main():
     app_js = open(os.path.join(D, 'web/app.js'), encoding='utf-8').read()
     check('app.js 不再有 openConsole / /api/console?since=', 'openConsole' not in app_js and '/api/console?since=' not in app_js)
     # 快捷方式存在
+    # 快捷方式是本机产物（.gitignore 里），仓库清理后可能不存在。
+    # 缺的时候退一步只要求「生成脚本还在」——那才是仓库该保证的东西。
+    mklnk = os.path.join(D, 'tools', 'make_lnk.py')
     for lnk in ('medreview_ui.lnk', 'medreview.lnk'):
-        check('存在快捷方式 %s' % lnk, os.path.exists(os.path.join(D, lnk)))
+        path = os.path.join(D, lnk)
+        if os.path.exists(path):
+            check('存在快捷方式 %s' % lnk, True)
+        else:
+            check('快捷方式 %s（缺失时要求生成脚本在）' % lnk,
+                  os.path.exists(mklnk), '本机产物，未生成')
 
     # ---------- 汇总 ----------
     print()
