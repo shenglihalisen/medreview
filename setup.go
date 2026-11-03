@@ -24,7 +24,7 @@ func defaultUsersPath(dbPath string) string {
 }
 
 // runSetup 执行向导，返回进程退出码。
-func runSetup(path string) int {
+func runSetup(path string, ephemeral bool) int {
 	fmt.Println("=== 超管设置 ===")
 	fmt.Println("留空数量 = 不启用登录（仅适合受信任局域网）")
 
@@ -45,8 +45,9 @@ func runSetup(path string) int {
 	}
 
 	if n == 0 {
-		if _, err := os.Stat(path); err == nil {
-			fmt.Printf("已存在 %s；如需彻底关闭登录，请手动删除该文件。\n", path)
+		// 明确选择 0：顺手清掉旧的临时凭据，避免"以为关了其实还在"
+		if err := os.Remove(path); err == nil {
+			fmt.Printf("已删除 %s，未启用登录。\n", path)
 		} else {
 			fmt.Println("未启用登录。")
 		}
@@ -109,11 +110,15 @@ func runSetup(path string) int {
 		admins[name] = true
 	}
 
-	if err := persistUsers(path, users, admins); err != nil {
+	if err := persistUsers(path, users, admins, ephemeral); err != nil {
 		fmt.Fprintln(os.Stderr, "写入失败:", err)
 		return 1
 	}
 	fmt.Printf("\n已写入 %s（%d 个超管）\n", path, len(users))
-	fmt.Println("以后启动会自动启用登录；要改密码请登录后在仪表盘里改，或重新运行 -setup。")
+	if ephemeral {
+		fmt.Println("本次运行有效：正常退出时会自动删除该文件，下次启动需要重新配置。")
+	} else {
+		fmt.Println("已持久化：以后启动会自动启用登录；要改密码请登录后在仪表盘里改。")
+	}
 	return 0
 }

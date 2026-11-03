@@ -210,6 +210,9 @@ func newApp(cfg appConfig, logs *logRing, logPath string) (*app, error) {
 	a.cfg.publicMode = a.cfg.publicMode || authCfg.Enabled
 	if authCfg.Enabled {
 		log.Printf("认证已启用：%d 个账号，会话 %s，审计=%q", len(authCfg.Users), sessionTTL, a.cfg.auditPath)
+		if authCfg.Ephemeral {
+			log.Printf("超管凭据为临时用途：正常退出后自动删除 %s（下次启动需重新配置）", authCfg.UsersPath)
+		}
 	}
 
 	a.h.startShareGC()
@@ -319,6 +322,10 @@ func (a *app) Close() {
 		exportReviewCSV(reviewCSVMakePath(a.cfg.dbPath, a.cfg.csvPath), a.db)
 		_ = a.db.Close()
 	}
+	// 临时超管凭据：正常退出就删掉（下次启动重新配置）。
+	// 只删自己写的那份 users.json，不碰用户用 -auth-file 指定的持久文件（除非它本身标了 ephemeral）。
+	cleanupEphemeralAuth(a.h)
+
 	// 退出清库：默认的临时库（没显式写 -db）连 medreview.db / -wal / -shm 一起删；
 	// 显式指定了 -db 的不删，跨重启保留（审阅记录和历史批注名都在里面）。
 	if !a.cfg.dbExplicit {

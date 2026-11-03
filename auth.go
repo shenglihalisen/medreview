@@ -52,6 +52,7 @@ type authConfig struct {
 	AuditPath  string
 	Secure     bool   // 只走 HTTPS 时置 true（Cookie 加 Secure）
 	UsersPath  string // -auth-file 的路径；非空才支持在网页里改密码（要写回）
+	Ephemeral  bool   // 临时凭据：正常退出时删除 users.json（下次启动重新配置）
 }
 
 // authState 运行期状态：登录失败计数 + 审计文件句柄。
@@ -321,8 +322,9 @@ func loadAuthConfig(single, file, keyHex, audit, adminsFlag string, secure bool)
 			return cfg, fmt.Errorf("读取 -auth-file 失败: %w", err)
 		}
 		var doc struct {
-			Users  map[string]string `json:"users"`
-			Admins []string          `json:"admins"`
+			Users     map[string]string `json:"users"`
+			Admins    []string          `json:"admins"`
+			Ephemeral bool              `json:"ephemeral"`
 		}
 		if err := json.Unmarshal(b, &doc); err != nil {
 			return cfg, fmt.Errorf("解析 -auth-file 失败: %w", err)
@@ -338,6 +340,7 @@ func loadAuthConfig(single, file, keyHex, audit, adminsFlag string, secure bool)
 				cfg.Admins[u] = true
 			}
 		}
+		cfg.Ephemeral = doc.Ephemeral
 	}
 	if single != "" {
 		parts := strings.SplitN(single, ":", 2)
@@ -410,6 +413,7 @@ func (h *Handler) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 		"canChange": h.authCfg.UsersPath != "",
 		"admin":     h.isAdmin(me),
 		"manage":    h.authCfg.UsersPath != "",
+		"ephemeral": h.authCfg.Ephemeral,
 	})
 }
 
@@ -465,7 +469,7 @@ func (h *Handler) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	}
 	h.auth.usersMu.Unlock()
 
-	if err := persistUsers(h.authCfg.UsersPath, snapshot, h.snapshotAdmins()); err != nil {
+	if err := persistUsers(h.authCfg.UsersPath, snapshot, h.snapshotAdmins(), h.authCfg.Ephemeral); err != nil {
 		h.auth.logAudit(r, me, "password-change", "fail(write)")
 		writeJSONStatus(w, http.StatusInternalServerError, map[string]any{"error": "写入 users.json 失败: " + err.Error()})
 		return
@@ -476,13 +480,16 @@ func (h *Handler) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 
 // persistUsers 原子写回 users.json（先写 .tmp 再 rename，避免半截文件）。
 // 权限固定 0600：里面虽然是哈希，也属于凭据。
-func persistUsers(path string, users map[string]string, admins map[string]bool) error {
+func persistUsers(path string, users map[string]string, admins map[string]bool, ephemeral bool) error {
 	var list []string
 	for n := range admins {
 		list = append(list, n)
 	}
 	sort.Strings(list)
 	doc := map[string]any{"users": users, "admins": list}
+	if ephemeral {
+		doc["ephemeral"] = true
+	}
 	b, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
 		return err
@@ -627,7 +634,7 @@ func (h *Handler) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) 
 	}
 	h.auth.usersMu.Unlock()
 
-	if err := persistUsers(h.authCfg.UsersPath, users, admins); err != nil {
+	if err := persistUsers(h.authCfg.UsersPath, users, admins, h.authCfg.Ephemeral); err != nil {
 		h.auth.logAudit(r, op, "admin-create "+req.Name, "fail(write)")
 		writeJSONStatus(w, http.StatusInternalServerError, map[string]any{"error": "写入 users.json 失败"})
 		return
@@ -679,7 +686,7 @@ func (h *Handler) handleAdminResetPassword(w http.ResponseWriter, r *http.Reques
 		admins[n] = v
 	}
 	h.auth.usersMu.Unlock()
-	if err := persistUsers(h.authCfg.UsersPath, users, admins); err != nil {
+	if err := persistUsers(h.authCfg.UsersPath, users, admins, h.authCfg.Ephemeral); err != nil {
 		h.auth.logAudit(r, op, "admin-reset "+req.Name, "fail(write)")
 		writeJSONStatus(w, http.StatusInternalServerError, map[string]any{"error": "写入 users.json 失败"})
 		return
@@ -740,7 +747,7 @@ func (h *Handler) handleAdminDeleteUser(w http.ResponseWriter, r *http.Request) 
 		admins[n] = v
 	}
 	h.auth.usersMu.Unlock()
-	if err := persistUsers(h.authCfg.UsersPath, users, admins); err != nil {
+	if err := persistUsers(h.authCfg.UsersPath, users, admins, h.authCfg.Ephemeral); err != nil {
 		h.auth.logAudit(r, op, "admin-delete "+req.Name, "fail(write)")
 		writeJSONStatus(w, http.StatusInternalServerError, map[string]any{"error": "写入 users.json 失败"})
 		return
@@ -800,7 +807,7 @@ func (h *Handler) handleAdminSetRole(w http.ResponseWriter, r *http.Request) {
 		admins[n] = v
 	}
 	h.auth.usersMu.Unlock()
-	if err := persistUsers(h.authCfg.UsersPath, users, admins); err != nil {
+	if err := persistUsers(h.authCfg.UsersPath, users, admins, h.authCfg.Ephemeral); err != nil {
 		h.auth.logAudit(r, op, "admin-role "+req.Name, "fail(write)")
 		writeJSONStatus(w, http.StatusInternalServerError, map[string]any{"error": "写入 users.json 失败"})
 		return
@@ -811,4 +818,14 @@ func (h *Handler) handleAdminSetRole(w http.ResponseWriter, r *http.Request) {
 	}
 	h.auth.logAudit(r, op, action+req.Name, "ok")
 	writeJSON(w, map[string]any{"ok": true})
+}
+
+// cleanupEphemeralAuth 正常退出时删除临时超管凭据（users.json 本身标了 ephemeral 才删）。
+func cleanupEphemeralAuth(h *Handler) {
+	if h == nil || !h.authCfg.Enabled || !h.authCfg.Ephemeral || h.authCfg.UsersPath == "" {
+		return
+	}
+	if err := os.Remove(h.authCfg.UsersPath); err == nil {
+		log.Printf("临时超管凭据已清除：%s", h.authCfg.UsersPath)
+	}
 }
