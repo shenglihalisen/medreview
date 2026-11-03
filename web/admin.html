@@ -128,10 +128,6 @@ html, body { margin: 0; padding: 0; background: var(--bg); }
 .dfold .dbar > i { display: block; height: 100%; background: var(--keep); transition: width .4s ease; }
 .dfold .dtot { font-size: 12.5px; color: var(--text-faint); flex-shrink: 0; }
 
-/* 自动刷新控件 */
-.dauto { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-dim); }
-.dauto input[type="checkbox"] { accent-color: var(--primary); }
-.dauto .dinput { padding: 2px 6px; font-size: 12.5px; }
 
 /* 目录进度：待审最多的目录，点一行直达该目录的待审文件 */
 .dftrow {
@@ -305,17 +301,7 @@ select.dinput { cursor: pointer; }
       <span class="dsub">实时态势总览</span>
     </div>
     <span class="dspacer"></span>
-    <label class="dauto" title="实时推送之外，再定时拉一次全量做兜底；页面切到后台会自动暂停">
-      <input type="checkbox" id="auto-on" checked>
-      <span>自动刷新</span>
-      <select id="auto-sec" class="dinput">
-        <option value="5">5 秒</option>
-        <option value="10">10 秒</option>
-        <option value="30">30 秒</option>
-        <option value="60">60 秒</option>
-      </select>
-    </label>
-    <button class="dchipbtn" id="refresh-now" title="立即拉取一次全量数据">刷新</button>
+    <button class="dchipbtn" id="refresh-now" title="立即拉取一次全量数据（平时靠实时推送，不需要点）">刷新</button>
     <div class="dconn"><span class="ddot" id="dot"></span><span id="updated">连接中…</span></div>
   </div>
   <div id="banner" class="dbanner" style="display:none"></div>
@@ -802,7 +788,8 @@ function applySection(name, data) {
 
 function touchUpdated() {
   $('dot').className = 'ddot ok';
-  $('updated').textContent = '已更新 ' + new Date().toLocaleTimeString('zh-CN');
+  lastEventAt = Date.now();
+  $('updated').textContent = '刚刚更新 · 实时';
 }
 
 // ---------- 事件流（唯一的实时数据来源） ----------
@@ -885,52 +872,42 @@ async function loadFull() {
   }
 }
 
-// ---------- 自动刷新（SSE 之外的兜底）----------
-// 实时靠 SSE；这里再加一个可调的定时全量对账，防"某条增量丢了/连接被代理掐了"。
-// 默认 30 秒，可在顶栏改 5/10/30/60 或直接关掉（关掉就纯靠推送）。
-// 页面在后台时不做，切回来立刻对账一次。
-var AUTO_KEY = 'mr_dash_auto_sec';
-var autoTimer = null;
-var loadingNow = false;
+// ---------- 实时状态：SSE + 秒级计时（不轮询）----------
+// 数据只走 SSE 推送；页面不主动拉。这里只维护一个"多久没收到推送"的计数器：
+//   - 每次收到 init / dash 事件都刷新 lastEventAt
+//   - 每秒重画一次文字（已更新 X 秒前）
+//   - 超过 60 秒没动静 → 判定连接已死，主动重连（比定时轮询省得多）
+var lastEventAt = 0;
+var STALE_SEC = 60;
 
-function autoSeconds() {
-  var v = parseInt(localStorage.getItem(AUTO_KEY) || '30', 10);
-  if (isNaN(v) || v < 0) v = 30;
-  return v;
+function reconnectEvents() {
+  try { if (window.__es) window.__es.close(); } catch (e) {}
+  window.__es = null;
+  connectEvents();
 }
 
-function applyAutoRefresh() {
-  if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
-  var sec = autoSeconds();
-  var sel = $('auto-sec'), chk = $('auto-on');
-  if (sel) sel.value = String(sec > 0 ? sec : 30);
-  if (chk) chk.checked = sec > 0;
-  if (sec > 0) {
-    autoTimer = setInterval(function () {
-      if (document.visibilityState === 'visible' && !loadingNow) loadFull();
-    }, sec * 1000);
+function tickSinceUpdate() {
+  if (!lastEventAt) return;
+  var sec = Math.max(0, Math.floor((Date.now() - lastEventAt) / 1000));
+  var el = $('updated');
+  if (sec <= 2) {
+    el.textContent = '刚刚更新 · 实时';
+  } else if (sec < STALE_SEC) {
+    el.textContent = '已更新 ' + sec + ' 秒前 · 实时';
+  } else {
+    el.textContent = '已 ' + sec + ' 秒没有推送，正在重连…';
+    $('dot').className = 'ddot err';
+    lastEventAt = 0;          // 防止每秒都触发重连
+    reconnectEvents();
   }
 }
 
-function bindAutoRefresh() {
-  var sel = $('auto-sec'), chk = $('auto-on'), btn = $('refresh-now');
-  if (sel) sel.onchange = function () {
-    localStorage.setItem(AUTO_KEY, String(parseInt(sel.value, 10) || 30));
-    applyAutoRefresh();
-  };
-  if (chk) chk.onchange = function () {
-    localStorage.setItem(AUTO_KEY, chk.checked ? (parseInt(sel && sel.value, 10) || 30) : '0');
-    applyAutoRefresh();
-  };
+function bindRefreshButton() {
+  var btn = $('refresh-now');
   if (btn) btn.onclick = function () { if (!loadingNow) loadFull(); };
-  applyAutoRefresh();
 }
 
-document.addEventListener('visibilitychange', function () {
-  if (document.visibilityState === 'visible') { connectEvents(); loadFull(); }
-});
-
-bindAutoRefresh();
+setInterval(tickSinceUpdate, 1000);
 
 // ---------- 交互绑定 ----------
 // 用事件委托而不是逐个绑：筛选 chip 是随渲染重画 innerHTML 的，

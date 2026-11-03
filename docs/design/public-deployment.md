@@ -43,6 +43,9 @@ Internet
 
 ## 3. Nginx 配置（同域托管前端 + 反代 API）
 
+> **可直接用的完整配置**：仓库里 [`packaging/nginx/medreview.conf`](../../packaging/nginx/medreview.conf)
+> 已经包含 SSE 专用 `location = /api/events`、大文件下载、两种部署形态，改三处即可上机。
+
 ```nginx
 server {
     listen 443 ssl http2;
@@ -126,6 +129,23 @@ medreview -public \
 会话密钥不指定就每次启动随机（重启要重新登录）。需要这些能力时，还是上 Authelia / OAuth2-Proxy。
 
 **强烈建议**：即使有内置认证，也把 `-public` 与 `-tls-cert/-tls-key` 一起用，别用明文 HTTP 传密码。
+
+### 3.1 SSE 不生效的排查顺序
+
+仪表盘是**纯推送**的（页面不轮询，只显示"已更新 X 秒前"）。数字不动时按这个顺序查：
+
+1. **直连后端**：浏览器打开 `http://后端:8080/admin.html`，数字会动 → 问题在代理层。
+2. **Nginx 是否关了缓冲**：`/api/events` 必须有 `proxy_buffering off;`、`proxy_cache off;`、`gzip off;`。
+3. **HTTP 版本**：`proxy_http_version 1.1;` + `proxy_set_header Connection "";`（缺前者会退化成短连接）。
+4. **超时**：`proxy_read_timeout` 默认 60s，SSE 会被周期性掐断；设 3600s。
+5. **看响应头**：`curl -N -H 'Accept: text/event-stream' https://域名/api/events` 应看到
+   `Content-Type: text/event-stream`、`Cache-Control: no-cache`、`X-Accel-Buffering: no`，
+   并且每 25 秒有一行 `: ping`。
+6. **CDN / 云 WAF**：Cloudflare 等会缓冲或超时，需要关闭对应缓冲或走直连。
+7. **前端跨源**：`EventSource` 无法附带 `Authorization`，跨源部署时前端会自动降级为定时拉取；
+   想用 SSE 就让前后端同源（推荐）或由代理注入认证。
+
+页面自身也有兜底：60 秒收不到任何推送会自动重连（`EventSource` 断线重连 + 主动重建）。
 
 ## 4. 前后端不同域（前端放 CDN / 另一台机器）
 
