@@ -47,6 +47,7 @@ const (
 type authConfig struct {
 	Enabled    bool
 	Users      map[string]string // 用户名 → bcrypt 哈希
+	Admins     map[string]bool   // 超管名单（可管理其他账号）
 	SessionKey []byte
 	AuditPath  string
 	Secure     bool   // 只走 HTTPS 时置 true（Cookie 加 Secure）
@@ -312,24 +313,30 @@ func (h *Handler) securityHeaders(w http.ResponseWriter, r *http.Request) {
 //	-auth user:pass          单账号（启动时 bcrypt 哈希）
 //	-auth-file users.json    多账号：{"users":{"alice":"$2a$..."}}
 //	-session-key <hex>       Cookie 签名密钥；不填则每次启动随机（重启需重新登录）
-func loadAuthConfig(single, file, keyHex, audit string, secure bool) (authConfig, error) {
-	cfg := authConfig{Users: map[string]string{}, AuditPath: audit, Secure: secure, UsersPath: file}
+func loadAuthConfig(single, file, keyHex, audit, adminsFlag string, secure bool) (authConfig, error) {
+	cfg := authConfig{Users: map[string]string{}, Admins: map[string]bool{}, AuditPath: audit, Secure: secure, UsersPath: file}
 	if file != "" {
 		b, err := os.ReadFile(file)
 		if err != nil {
 			return cfg, fmt.Errorf("读取 -auth-file 失败: %w", err)
 		}
 		var doc struct {
-			Users map[string]string `json:"users"`
+			Users  map[string]string `json:"users"`
+			Admins []string          `json:"admins"`
 		}
 		if err := json.Unmarshal(b, &doc); err != nil {
 			return cfg, fmt.Errorf("解析 -auth-file 失败: %w", err)
 		}
 		for u, hash := range doc.Users {
 			if !strings.HasPrefix(hash, "$2") {
-				return cfg, fmt.Errorf("用户 %s 的密码不是 bcrypt 哈希（用 htpasswd -bnBC 10 \"\" pass 生成）", u)
+				return cfg, fmt.Errorf("用户 %s 的密码不是 bcrypt 哈希（用 -hash-pass 生成）", u)
 			}
 			cfg.Users[u] = hash
+		}
+		for _, u := range doc.Admins {
+			if _, ok := cfg.Users[u]; ok {
+				cfg.Admins[u] = true
+			}
 		}
 	}
 	if single != "" {
@@ -343,6 +350,18 @@ func loadAuthConfig(single, file, keyHex, audit string, secure bool) (authConfig
 		}
 		cfg.Users[parts[0]] = string(hash)
 	}
+	// -admin name1,name2：把这些账号标成超管（建议配合 -auth-file 使用）
+	for _, n := range strings.Split(adminsFlag, ",") {
+		n = strings.TrimSpace(n)
+		if n == "" {
+			continue
+		}
+		if _, ok := cfg.Users[n]; !ok {
+			return cfg, fmt.Errorf("-admin 指定的用户 %q 不存在", n)
+		}
+		cfg.Admins[n] = true
+	}
+
 	if len(cfg.Users) == 0 {
 		return cfg, nil
 	}
@@ -389,6 +408,7 @@ func (h *Handler) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 		"user":      me,
 		"users":     names,
 		"canChange": h.authCfg.UsersPath != "",
+		"admin":     h.isAdmin(me),
 	})
 }
 
@@ -444,7 +464,7 @@ func (h *Handler) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	}
 	h.auth.usersMu.Unlock()
 
-	if err := persistUsers(h.authCfg.UsersPath, snapshot); err != nil {
+	if err := persistUsers(h.authCfg.UsersPath, snapshot, h.snapshotAdmins()); err != nil {
 		h.auth.logAudit(r, me, "password-change", "fail(write)")
 		writeJSONStatus(w, http.StatusInternalServerError, map[string]any{"error": "写入 users.json 失败: " + err.Error()})
 		return
@@ -455,8 +475,13 @@ func (h *Handler) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 
 // persistUsers 原子写回 users.json（先写 .tmp 再 rename，避免半截文件）。
 // 权限固定 0600：里面虽然是哈希，也属于凭据。
-func persistUsers(path string, users map[string]string) error {
-	doc := map[string]any{"users": users}
+func persistUsers(path string, users map[string]string, admins map[string]bool) error {
+	var list []string
+	for n := range admins {
+		list = append(list, n)
+	}
+	sort.Strings(list)
+	doc := map[string]any{"users": users, "admins": list}
 	b, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
 		return err
@@ -470,4 +495,319 @@ func persistUsers(path string, users map[string]string) error {
 		// Windows 上 chmod 基本无效，忽略
 	}
 	return os.Rename(tmp, path)
+}
+
+// ---------- 超管（2026-11-03）----------
+// 规则（刻意保守）：
+//   · 超管只能由 -admin 启动参数或 users.json 的 admins 指定，**没有"第一个注册者自动成超管"**
+//   · 超管可增删用户、重置任意用户密码、升降权
+//   · 不能删除自己；不能把最后一个超管降级或删除（避免把自己锁死）
+//   · 所有动作记审计
+
+// isAdmin 当前用户是否超管（每次请求现查，撤销立即生效）。
+func (h *Handler) isAdmin(name string) bool {
+	if !h.authCfg.Enabled || name == "" {
+		return false
+	}
+	h.auth.usersMu.Lock()
+	defer h.auth.usersMu.Unlock()
+	return h.authCfg.Admins[name]
+}
+
+// snapshotAdmins 拷贝一份超管名单（持久化用）。
+func (h *Handler) snapshotAdmins() map[string]bool {
+	h.auth.usersMu.Lock()
+	defer h.auth.usersMu.Unlock()
+	out := make(map[string]bool, len(h.authCfg.Admins))
+	for n, v := range h.authCfg.Admins {
+		if v {
+			out[n] = true
+		}
+	}
+	return out
+}
+
+// requireAdmin 校验登录 + 超管身份；返回操作者名字。
+func (h *Handler) requireAdmin(w http.ResponseWriter, r *http.Request) (string, bool) {
+	me := h.sessionUser(r)
+	if me == "" {
+		writeJSONStatus(w, http.StatusUnauthorized, map[string]any{"error": "未登录"})
+		return "", false
+	}
+	if !h.isAdmin(me) {
+		h.auth.logAudit(r, me, "admin", "denied")
+		writeJSONStatus(w, http.StatusForbidden, map[string]any{"error": "需要超管权限"})
+		return "", false
+	}
+	return me, true
+}
+
+// validUserName 用户名白名单：1..32 个字符，不含控制字符与冒号（避免和 user:pass 混淆）。
+func validUserName(n string) bool {
+	n = strings.TrimSpace(n)
+	if n == "" || len([]rune(n)) > 32 {
+		return false
+	}
+	for _, c := range n {
+		if c < 0x20 || c == ':' || c == '/' || c == '\\' {
+			return false
+		}
+	}
+	return true
+}
+
+// GET /api/admin/users → [{name, admin, self}]
+func (h *Handler) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.requireAdmin(w, r); !ok {
+		return
+	}
+	me := h.sessionUser(r)
+	h.auth.usersMu.Lock()
+	out := make([]map[string]any, 0, len(h.authCfg.Users))
+	for n := range h.authCfg.Users {
+		out = append(out, map[string]any{"name": n, "admin": h.authCfg.Admins[n], "self": n == me})
+	}
+	h.auth.usersMu.Unlock()
+	sort.Slice(out, func(i, j int) bool { return out[i]["name"].(string) < out[j]["name"].(string) })
+	writeJSON(w, map[string]any{"users": out, "me": me})
+}
+
+// POST /api/admin/users {name,password,admin}
+func (h *Handler) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
+	op, ok := h.requireAdmin(w, r)
+	if !ok {
+		return
+	}
+	if h.authCfg.UsersPath == "" {
+		writeJSONStatus(w, http.StatusConflict, map[string]any{"error": "需要 -auth-file 模式才能管理用户"})
+		return
+	}
+	var req struct {
+		Name     string `json:"name"`
+		Password string `json:"password"`
+		Admin    bool   `json:"admin"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192)).Decode(&req); err != nil {
+		http.Error(w, "请求格式错误", http.StatusBadRequest)
+		return
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	if !validUserName(req.Name) {
+		writeJSONStatus(w, http.StatusBadRequest, map[string]any{"error": "用户名需 1-32 个字符，不能含冒号或斜杠"})
+		return
+	}
+	if len([]rune(req.Password)) < 8 {
+		writeJSONStatus(w, http.StatusBadRequest, map[string]any{"error": "密码至少 8 位"})
+		return
+	}
+	h.auth.usersMu.Lock()
+	if _, exists := h.authCfg.Users[req.Name]; exists {
+		h.auth.usersMu.Unlock()
+		writeJSONStatus(w, http.StatusConflict, map[string]any{"error": "用户已存在"})
+		return
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), 10)
+	if err != nil {
+		h.auth.usersMu.Unlock()
+		http.Error(w, "生成失败", http.StatusInternalServerError)
+		return
+	}
+	h.authCfg.Users[req.Name] = string(hash)
+	if req.Admin {
+		h.authCfg.Admins[req.Name] = true
+	}
+	users := make(map[string]string, len(h.authCfg.Users))
+	for n, v := range h.authCfg.Users {
+		users[n] = v
+	}
+	admins := make(map[string]bool, len(h.authCfg.Admins))
+	for n, v := range h.authCfg.Admins {
+		admins[n] = v
+	}
+	h.auth.usersMu.Unlock()
+
+	if err := persistUsers(h.authCfg.UsersPath, users, admins); err != nil {
+		h.auth.logAudit(r, op, "admin-create "+req.Name, "fail(write)")
+		writeJSONStatus(w, http.StatusInternalServerError, map[string]any{"error": "写入 users.json 失败"})
+		return
+	}
+	h.auth.logAudit(r, op, "admin-create "+req.Name, "ok")
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// POST /api/admin/users/password {name,password} —— 超管重置任意用户密码
+func (h *Handler) handleAdminResetPassword(w http.ResponseWriter, r *http.Request) {
+	op, ok := h.requireAdmin(w, r)
+	if !ok {
+		return
+	}
+	if h.authCfg.UsersPath == "" {
+		writeJSONStatus(w, http.StatusConflict, map[string]any{"error": "需要 -auth-file 模式才能管理用户"})
+		return
+	}
+	var req struct {
+		Name     string `json:"name"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192)).Decode(&req); err != nil {
+		http.Error(w, "请求格式错误", http.StatusBadRequest)
+		return
+	}
+	if len([]rune(req.Password)) < 8 {
+		writeJSONStatus(w, http.StatusBadRequest, map[string]any{"error": "密码至少 8 位"})
+		return
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), 10)
+	if err != nil {
+		http.Error(w, "生成失败", http.StatusInternalServerError)
+		return
+	}
+	h.auth.usersMu.Lock()
+	if _, exists := h.authCfg.Users[req.Name]; !exists {
+		h.auth.usersMu.Unlock()
+		writeJSONStatus(w, http.StatusNotFound, map[string]any{"error": "用户不存在"})
+		return
+	}
+	h.authCfg.Users[req.Name] = string(hash)
+	users := make(map[string]string, len(h.authCfg.Users))
+	for n, v := range h.authCfg.Users {
+		users[n] = v
+	}
+	admins := make(map[string]bool, len(h.authCfg.Admins))
+	for n, v := range h.authCfg.Admins {
+		admins[n] = v
+	}
+	h.auth.usersMu.Unlock()
+	if err := persistUsers(h.authCfg.UsersPath, users, admins); err != nil {
+		h.auth.logAudit(r, op, "admin-reset "+req.Name, "fail(write)")
+		writeJSONStatus(w, http.StatusInternalServerError, map[string]any{"error": "写入 users.json 失败"})
+		return
+	}
+	h.auth.logAudit(r, op, "admin-reset "+req.Name, "ok")
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// POST /api/admin/users/delete {name}
+func (h *Handler) handleAdminDeleteUser(w http.ResponseWriter, r *http.Request) {
+	op, ok := h.requireAdmin(w, r)
+	if !ok {
+		return
+	}
+	if h.authCfg.UsersPath == "" {
+		writeJSONStatus(w, http.StatusConflict, map[string]any{"error": "需要 -auth-file 模式才能管理用户"})
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
+		http.Error(w, "请求格式错误", http.StatusBadRequest)
+		return
+	}
+	if req.Name == op {
+		writeJSONStatus(w, http.StatusBadRequest, map[string]any{"error": "不能删除自己"})
+		return
+	}
+	h.auth.usersMu.Lock()
+	if _, exists := h.authCfg.Users[req.Name]; !exists {
+		h.auth.usersMu.Unlock()
+		writeJSONStatus(w, http.StatusNotFound, map[string]any{"error": "用户不存在"})
+		return
+	}
+	// 最后一名超管不能删
+	if h.authCfg.Admins[req.Name] {
+		n := 0
+		for _, v := range h.authCfg.Admins {
+			if v {
+				n++
+			}
+		}
+		if n <= 1 {
+			h.auth.usersMu.Unlock()
+			writeJSONStatus(w, http.StatusBadRequest, map[string]any{"error": "这是最后一个超管，不能删除"})
+			return
+		}
+	}
+	delete(h.authCfg.Users, req.Name)
+	delete(h.authCfg.Admins, req.Name)
+	users := make(map[string]string, len(h.authCfg.Users))
+	for n, v := range h.authCfg.Users {
+		users[n] = v
+	}
+	admins := make(map[string]bool, len(h.authCfg.Admins))
+	for n, v := range h.authCfg.Admins {
+		admins[n] = v
+	}
+	h.auth.usersMu.Unlock()
+	if err := persistUsers(h.authCfg.UsersPath, users, admins); err != nil {
+		h.auth.logAudit(r, op, "admin-delete "+req.Name, "fail(write)")
+		writeJSONStatus(w, http.StatusInternalServerError, map[string]any{"error": "写入 users.json 失败"})
+		return
+	}
+	h.auth.logAudit(r, op, "admin-delete "+req.Name, "ok")
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// POST /api/admin/users/role {name,admin}
+func (h *Handler) handleAdminSetRole(w http.ResponseWriter, r *http.Request) {
+	op, ok := h.requireAdmin(w, r)
+	if !ok {
+		return
+	}
+	if h.authCfg.UsersPath == "" {
+		writeJSONStatus(w, http.StatusConflict, map[string]any{"error": "需要 -auth-file 模式才能管理用户"})
+		return
+	}
+	var req struct {
+		Name  string `json:"name"`
+		Admin bool   `json:"admin"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
+		http.Error(w, "请求格式错误", http.StatusBadRequest)
+		return
+	}
+	h.auth.usersMu.Lock()
+	if _, exists := h.authCfg.Users[req.Name]; !exists {
+		h.auth.usersMu.Unlock()
+		writeJSONStatus(w, http.StatusNotFound, map[string]any{"error": "用户不存在"})
+		return
+	}
+	if !req.Admin && h.authCfg.Admins[req.Name] {
+		n := 0
+		for _, v := range h.authCfg.Admins {
+			if v {
+				n++
+			}
+		}
+		if n <= 1 {
+			h.auth.usersMu.Unlock()
+			writeJSONStatus(w, http.StatusBadRequest, map[string]any{"error": "这是最后一个超管，不能降级"})
+			return
+		}
+	}
+	if req.Admin {
+		h.authCfg.Admins[req.Name] = true
+	} else {
+		delete(h.authCfg.Admins, req.Name)
+	}
+	users := make(map[string]string, len(h.authCfg.Users))
+	for n, v := range h.authCfg.Users {
+		users[n] = v
+	}
+	admins := make(map[string]bool, len(h.authCfg.Admins))
+	for n, v := range h.authCfg.Admins {
+		admins[n] = v
+	}
+	h.auth.usersMu.Unlock()
+	if err := persistUsers(h.authCfg.UsersPath, users, admins); err != nil {
+		h.auth.logAudit(r, op, "admin-role "+req.Name, "fail(write)")
+		writeJSONStatus(w, http.StatusInternalServerError, map[string]any{"error": "写入 users.json 失败"})
+		return
+	}
+	action := "admin-demote "
+	if req.Admin {
+		action = "admin-promote "
+	}
+	h.auth.logAudit(r, op, action+req.Name, "ok")
+	writeJSON(w, map[string]any{"ok": true})
 }

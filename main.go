@@ -67,6 +67,7 @@ func main() {
 	tlsCert := flag.String("tls-cert", "", "直接提供 HTTPS 时的证书路径（.pem）")
 	tlsKey := flag.String("tls-key", "", "直接提供 HTTPS 时的私钥路径")
 	publicMode := flag.Bool("public", false, "公网模式：强制认证 + 安全默认值（需配合 -auth/-auth-file）")
+	adminsFlag := flag.String("admin", "", "超管名单，逗号分隔（这些账号可在仪表盘里管理其他用户）")
 	hashPass := flag.String("hash-pass", "", "只输出该密码的 bcrypt 哈希（写 -auth-file 用），然后退出；用 -hash-pass - 可从标准输入读，避免进 shell 历史")
 	vjobs := flag.Int("vjobs", 3, "视频预转码并发数，即预热时同时转几个视频")
 	encFlag := flag.String("enc", "", "视频转码编码：cpu=libx264 软编（默认）；nvenc/qsv/amf(仅Windows)=只用指定的这些（逗号分隔，如 nvenc,qsv）；auto=都比速度，快 20%+ 才换")
@@ -260,6 +261,7 @@ func main() {
 		tlsCert:          *tlsCert,
 		tlsKey:           *tlsKey,
 		publicMode:       *publicMode,
+		admins:           *adminsFlag,
 	}
 
 	a, err := newApp(cfg, logRing500, logFilePath)

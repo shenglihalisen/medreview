@@ -129,6 +129,27 @@ html, body { margin: 0; padding: 0; background: var(--bg); }
 .dfold .dtot { font-size: 12.5px; color: var(--text-faint); flex-shrink: 0; }
 
 
+/* 超管：用户管理 */
+.dadmin { margin-top: 16px; padding-top: 14px; border-top: 1px dashed var(--border); }
+.dadminhead { font-size: 12.5px; font-weight: 600; color: var(--text-dim); margin-bottom: 8px; }
+.dutable { width: 100%; border-collapse: collapse; font-size: 13px; }
+.dutable th { text-align: left; font-weight: 600; color: var(--text-faint); font-size: 12px; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+.dutable td { padding: 7px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.dutable tr:last-child td { border-bottom: 0; }
+.dutable .drole { font-size: 11.5px; padding: 1px 7px; border-radius: 99px; background: var(--bg); border: 1px solid var(--border); color: var(--text-dim); }
+.dutable .drole.super { border-color: var(--primary); color: var(--primary); background: var(--primary-soft); }
+.dutable .dops { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.dutable .dops button, .dnewuser button { font-size: 12px; padding: 3px 9px; border-radius: 6px; border: 1px solid var(--border); background: #fff; color: var(--text); cursor: pointer; }
+.dutable .dops button:hover, .dnewuser button:hover { border-color: var(--primary); color: var(--primary); }
+.dutable .dops button.danger:hover { border-color: var(--reject); color: var(--reject); }
+.dutable input[type="password"] { width: 130px; height: 26px; padding: 0 8px; border: 1px solid var(--border-strong); border-radius: 6px; font-size: 12.5px; }
+.dnewuser { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 12px; }
+.dnewuser input[type="text"], .dnewuser input[type="password"] { height: 30px; padding: 0 9px; border: 1px solid var(--border-strong); border-radius: 7px; font-size: 13px; }
+.dnewuser label { font-size: 12.5px; color: var(--text-dim); display: inline-flex; gap: 4px; align-items: center; }
+.dumsg { font-size: 12.5px; margin-top: 8px; min-height: 18px; }
+.dumsg.ok { color: var(--keep); }
+.dumsg.err { color: var(--reject); }
+
 /* 账号：当前登录 + 本机可改密码 */
 .dacct { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px; }
 .dacct .dwho { font-size: 13px; color: var(--text-dim); }
@@ -778,6 +799,7 @@ async function renderAccount() {
       <div class="dwho">当前登录：<b>${esc(d.user || '—')}</b></div>
       <div class="dusers">${users}</div>
     </div>
+    ${d.admin ? '<div class="dadmin" id="adminbox"></div>' : ''}
     ${d.canChange ? `
     <div class="dpwd">
       <input class="dinput" id="pw-old" type="password" placeholder="当前密码" autocomplete="current-password">
@@ -789,6 +811,7 @@ async function renderAccount() {
     <div class="dnote">当前以 -auth 单账号启动，密码写在启动参数里；想在这里改密码，请改用
       <code>-auth-file users.json</code> 启动。</div>`}
   `;
+  if (d.admin) renderAdminUsers();
   const btn = $('pw-go');
   if (!btn) return;
   btn.onclick = async () => {
@@ -820,6 +843,105 @@ async function renderAccount() {
     } finally {
       btn.disabled = false;
     }
+  };
+}
+
+// 超管：用户管理。所有动作都走后端校验（前端只负责少让人误点）。
+async function renderAdminUsers() {
+  const box = $('adminbox');
+  if (!box) return;
+  let d;
+  try {
+    const r = await fetch('/api/admin/users', { cache: 'no-store' });
+    if (!r.ok) { box.innerHTML = '<div class="dnote">没有超管权限</div>'; return; }
+    d = await r.json();
+  } catch (e) { box.innerHTML = '<div class="dnote">加载失败：' + esc(e.message) + '</div>'; return; }
+
+  const rows = (d.users || []).map((u) => `
+    <tr data-user="${esc(u.name)}">
+      <td>${esc(u.name)}${u.self ? ' <span class="drole">我</span>' : ''}</td>
+      <td><span class="drole${u.admin ? ' super' : ''}">${u.admin ? '超管' : '普通'}</span></td>
+      <td><div class="dops">
+        <button data-act="role" data-admin="${u.admin ? '0' : '1'}">${u.admin ? '撤超管' : '设超管'}</button>
+        <button data-act="reset">重置密码</button>
+        <button data-act="delete" class="danger" ${u.self ? 'disabled title="不能删除自己"' : ''}>删除</button>
+      </div></td>
+    </tr>`).join('');
+
+  box.innerHTML = `
+    <div class="dadminhead">用户管理（超管）</div>
+    <table class="dutable">
+      <thead><tr><th>用户</th><th>角色</th><th style="text-align:right">操作</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div class="dnewuser">
+      <input id="nu-name" type="text" placeholder="新用户名" autocomplete="off" style="width:150px">
+      <input id="nu-pw" type="password" placeholder="初始密码（≥8 位）" autocomplete="new-password">
+      <label><input type="checkbox" id="nu-admin"> 设为超管</label>
+      <button id="nu-go">添加用户</button>
+    </div>
+    <div class="dumsg" id="du-msg"></div>`;
+
+  const msg = $('du-msg');
+  const say = (ok, text) => { msg.className = 'dumsg ' + (ok ? 'ok' : 'err'); msg.textContent = text; };
+  const post = async (url, body) => {
+    const r = await fetch(url, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    const j = await r.json().catch(() => ({}));
+    return { ok: r.ok, status: r.status, j };
+  };
+
+  box.querySelectorAll('tr[data-user]').forEach((tr) => {
+    const name = tr.getAttribute('data-user');
+    tr.querySelectorAll('button[data-act]').forEach((b) => {
+      b.onclick = async () => {
+        const act = b.getAttribute('data-act');
+        try {
+          if (act === 'delete') {
+            if (!confirm('确定删除用户「' + name + '」？此操作不可撤销。')) return;
+            const res = await post('/api/admin/users/delete', { name });
+            if (!res.ok) return say(false, res.j.error || '删除失败');
+            say(true, '已删除 ' + name); return renderAdminUsers();
+          }
+          if (act === 'role') {
+            const makeAdmin = b.getAttribute('data-admin') === '1';
+            const res = await post('/api/admin/users/role', { name, admin: makeAdmin });
+            if (!res.ok) return say(false, res.j.error || '操作失败');
+            say(true, (makeAdmin ? '已设为超管：' : '已撤销超管：') + name);
+            return renderAdminUsers();
+          }
+          if (act === 'reset') {
+            // 原地展开密码输入，避免用原生 prompt
+            const cell = b.parentElement;
+            cell.innerHTML = '<input type="password" placeholder="新密码（≥8 位）"><button data-ok="1">确定</button><button data-cancel="1">取消</button>';
+            cell.querySelector('[data-cancel]').onclick = () => renderAdminUsers();
+            cell.querySelector('[data-ok]').onclick = async () => {
+              const pw = cell.querySelector('input').value;
+              if (pw.length < 8) return say(false, '新密码至少 8 位');
+              const res = await post('/api/admin/users/password', { name, password: pw });
+              if (!res.ok) return say(false, res.j.error || '重置失败');
+              say(true, '已重置 ' + name + ' 的密码');
+              renderAdminUsers();
+            };
+          }
+        } catch (e) { say(false, '网络错误：' + e.message); }
+      };
+    });
+  });
+
+  $('nu-go').onclick = async () => {
+    const name = ($('nu-name').value || '').trim();
+    const pw = $('nu-pw').value || '';
+    const isAdmin = $('nu-admin').checked;
+    if (!name) return say(false, '请填写用户名');
+    if (pw.length < 8) return say(false, '初始密码至少 8 位');
+    try {
+      const res = await post('/api/admin/users', { name, password: pw, admin: isAdmin });
+      if (!res.ok) return say(false, res.j.error || '添加失败');
+      say(true, '已添加用户 ' + name);
+      renderAdminUsers();
+    } catch (e) { say(false, '网络错误：' + e.message); }
   };
 }
 
