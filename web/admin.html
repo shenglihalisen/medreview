@@ -129,6 +129,20 @@ html, body { margin: 0; padding: 0; background: var(--bg); }
 .dfold .dtot { font-size: 12.5px; color: var(--text-faint); flex-shrink: 0; }
 
 
+/* 账号：当前登录 + 本机可改密码 */
+.dacct { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px; }
+.dacct .dwho { font-size: 13px; color: var(--text-dim); }
+.dacct .dwho b { color: var(--text); }
+.dacct .dusers { display: flex; gap: 6px; flex-wrap: wrap; }
+.dacct .du { font-size: 12px; padding: 1px 8px; border-radius: 99px; background: var(--bg); border: 1px solid var(--border); color: var(--text-dim); }
+.dacct .du.me { border-color: var(--primary); color: var(--primary); background: var(--primary-soft); }
+.dpwd { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.dpwd .dinput { flex: 1 1 180px; min-width: 150px; }
+.dpwdmsg { font-size: 12.5px; margin-top: 8px; min-height: 18px; }
+.dpwdmsg.ok { color: var(--keep); }
+.dpwdmsg.err { color: var(--reject); }
+.dnote { font-size: 12.5px; color: var(--text-faint); }
+
 /* 目录进度：待审最多的目录，点一行直达该目录的待审文件 */
 .dftrow {
   display: grid; grid-template-columns: minmax(0,1fr) 130px 86px; gap: 14px;
@@ -372,6 +386,11 @@ select.dinput { cursor: pointer; }
         <button class="dchipbtn" id="iss-only-err">只看错误</button>
       </div>
       <div id="issues"></div>
+    </div>
+
+    <div class="dblock" id="acctblock" style="display:none">
+      <div class="dbhead">账号 <span class="dbmeta" id="acct-meta"></span></div>
+      <div id="acct"></div>
     </div>
 
     <div class="dblock">
@@ -737,6 +756,73 @@ function renderWorkers() {
   }).join('');
 }
 
+// 账号块：只在启用认证时出现；能改密码的只有 -auth-file 模式（要写回文件）。
+async function renderAccount() {
+  const block = $('acctblock'), box = $('acct'), meta = $('acct-meta');
+  let d;
+  try {
+    const r = await fetch('/api/auth/me', { cache: 'no-store' });
+    if (r.status === 404) { block.style.display = 'none'; return; }   // 未启用认证
+    if (!r.ok) { block.style.display = 'none'; return; }
+    d = await r.json();
+  } catch (e) {
+    block.style.display = 'none';
+    return;
+  }
+  block.style.display = '';
+  meta.textContent = d.canChange ? '可修改密码' : '密码由启动参数指定';
+  const users = (d.users || []).map((u) =>
+    `<span class="du${u === d.user ? ' me' : ''}">${esc(u)}</span>`).join('');
+  box.innerHTML = `
+    <div class="dacct">
+      <div class="dwho">当前登录：<b>${esc(d.user || '—')}</b></div>
+      <div class="dusers">${users}</div>
+    </div>
+    ${d.canChange ? `
+    <div class="dpwd">
+      <input class="dinput" id="pw-old" type="password" placeholder="当前密码" autocomplete="current-password">
+      <input class="dinput" id="pw-new" type="password" placeholder="新密码（至少 8 位）" autocomplete="new-password">
+      <input class="dinput" id="pw-new2" type="password" placeholder="重复新密码" autocomplete="new-password">
+      <button class="dchipbtn" id="pw-go">修改密码</button>
+    </div>
+    <div class="dpwdmsg" id="pw-msg"></div>` : `
+    <div class="dnote">当前以 -auth 单账号启动，密码写在启动参数里；想在这里改密码，请改用
+      <code>-auth-file users.json</code> 启动。</div>`}
+  `;
+  const btn = $('pw-go');
+  if (!btn) return;
+  btn.onclick = async () => {
+    const msg = $('pw-msg');
+    const oldP = $('pw-old').value, n1 = $('pw-new').value, n2 = $('pw-new2').value;
+    msg.className = 'dpwdmsg';
+    if (!oldP || !n1) { msg.classList.add('err'); msg.textContent = '请填写当前密码和新密码'; return; }
+    if (n1 !== n2) { msg.classList.add('err'); msg.textContent = '两次输入的新密码不一致'; return; }
+    if (n1.length < 8) { msg.classList.add('err'); msg.textContent = '新密码至少 8 位'; return; }
+    btn.disabled = true;
+    try {
+      const r = await fetch('/api/auth/password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ oldPassword: oldP, newPassword: n1 }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (r.ok) {
+        msg.classList.add('ok');
+        msg.textContent = '已修改，下次登录请用新密码';
+        $('pw-old').value = $('pw-new').value = $('pw-new2').value = '';
+      } else {
+        msg.classList.add('err');
+        msg.textContent = j.error || ('修改失败（HTTP ' + r.status + '）');
+      }
+    } catch (e) {
+      msg.classList.add('err');
+      msg.textContent = '网络错误：' + e.message;
+    } finally {
+      btn.disabled = false;
+    }
+  };
+}
+
 function renderScan() {
   const scan = SECTIONS.scan;
   const b = $('banner');
@@ -986,6 +1072,7 @@ async function forceRelease(folderId, owner) {
 bindRefreshButton();
 loadFull();
 connectEvents();
+renderAccount();
 </script>
 </body>
 </html>
