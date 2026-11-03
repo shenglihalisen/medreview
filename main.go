@@ -70,6 +70,7 @@ func main() {
 	adminsFlag := flag.String("admin", "", "超管名单，逗号分隔（这些账号可在仪表盘里管理其他用户）")
 	adminUser := flag.String("admin-user", "", "启动时交互输入该账号的超管密码（不回显）；只保留这一个超管")
 	setupMode := flag.Bool("setup", false, "交互式配置超管（问数量→账号→密码），写入 users.json 后退出")
+	ephemeralAuth := flag.Bool("ephemeral", false, "超管凭据只在本次运行有效，正常退出时删除（start.bat/start.sh 默认开启）")
 	hashPass := flag.String("hash-pass", "", "只输出该密码的 bcrypt 哈希（写 -auth-file 用），然后退出；用 -hash-pass - 可从标准输入读，避免进 shell 历史")
 	vjobs := flag.Int("vjobs", 3, "视频预转码并发数，即预热时同时转几个视频")
 	encFlag := flag.String("enc", "", "视频转码编码：cpu=libx264 软编（默认）；nvenc/qsv/amf(仅Windows)=只用指定的这些（逗号分隔，如 nvenc,qsv）；auto=都比速度，快 20%+ 才换")
@@ -113,7 +114,8 @@ func main() {
 		if path == "" {
 			path = defaultUsersPath(*dbPath)
 		}
-		os.Exit(runSetup(path))
+		eph := *ephemeralAuth || strings.TrimSpace(os.Getenv("MEDREVIEW_EPHEMERAL")) == "1"
+		os.Exit(runSetup(path, eph))
 	}
 
 	// ---------- 命令行里可能带的手工引号，统一在这里收口 ----------

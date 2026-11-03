@@ -54,6 +54,7 @@ set /p "ADMINS=Admin accounts for login (0=none, Enter=0): "
 if "!ADMINS!"=="" set "ADMINS=0"
 if not "!ADMINS!"=="0" (
   set "MEDREVIEW_ADMINS=!ADMINS!"
+  set "MEDREVIEW_EPHEMERAL=1"
   echo.
   echo --- ≈‰÷√≥¨π‹’À∫≈£®√‹¬Î ‰»Î≤ªªÿœ‘£©---
   medreview.exe -setup -db medreview.db
