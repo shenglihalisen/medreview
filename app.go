@@ -52,6 +52,7 @@ type appConfig struct {
 	tlsCert    string // -tls-cert
 	tlsKey     string // -tls-key
 	publicMode bool   // -public：强制认证 + 安全默认值
+	admins     string // -admin 逗号分隔的超管名单
 	vjobs      int    // 视频预热并发数
 	qcHW       string // QC 视频解码："cpu"=软解；"cuda"/"qsv"/"d3d11va"=只用那一条；"auto"=探测择优。对应 -qcdec
 	encHW      string // 视频转码编码："cpu"=libx264；"nvenc"/"qsv"/"amf"=只用那一个；"auto"=择优。对应 -enc
@@ -172,7 +173,7 @@ func newApp(cfg appConfig, logs *logRing, logPath string) (*app, error) {
 		// 「有没有本地窗口」：gui / wails 版都有，console 版只有黑窗口
 		gui: buildMode != "console",
 	}
-	authCfg, err := loadAuthConfig(a.cfg.authSingle, a.cfg.authFile, a.cfg.sessionKey, a.cfg.auditPath, a.cfg.tlsCert != "" || a.cfg.publicMode)
+	authCfg, err := loadAuthConfig(a.cfg.authSingle, a.cfg.authFile, a.cfg.sessionKey, a.cfg.auditPath, a.cfg.admins, a.cfg.tlsCert != "" || a.cfg.publicMode)
 	if err != nil {
 		return nil, err
 	}
