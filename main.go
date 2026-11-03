@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"crypto/rand"
 	"embed"
 	"encoding/hex"
@@ -18,6 +19,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 //go:embed all:web
@@ -64,6 +67,7 @@ func main() {
 	tlsCert := flag.String("tls-cert", "", "直接提供 HTTPS 时的证书路径（.pem）")
 	tlsKey := flag.String("tls-key", "", "直接提供 HTTPS 时的私钥路径")
 	publicMode := flag.Bool("public", false, "公网模式：强制认证 + 安全默认值（需配合 -auth/-auth-file）")
+	hashPass := flag.String("hash-pass", "", "只输出该密码的 bcrypt 哈希（写 -auth-file 用），然后退出；用 -hash-pass - 可从标准输入读，避免进 shell 历史")
 	vjobs := flag.Int("vjobs", 3, "视频预转码并发数，即预热时同时转几个视频")
 	encFlag := flag.String("enc", "", "视频转码编码：cpu=libx264 软编（默认）；nvenc/qsv/amf(仅Windows)=只用指定的这些（逗号分隔，如 nvenc,qsv）；auto=都比速度，快 20%+ 才换")
 	qcFlag := flag.String("qcdec", "", "视频 QC 解码：cpu=软解（默认）；cuda/qsv/vaapi(Linux)/d3d11va(Windows)=只用指定的这些（逗号分隔）；auto=探测后择优")
@@ -76,6 +80,29 @@ func main() {
 	logFile := flag.String("log", "", "日志文件路径；留空自动挑：当前目录 → 程序所在目录 → 临时目录")
 	gpuInfo := flag.Bool("gpuinfo", false, "只探测并打印本机显卡（独显/核显）然后退出；start.bat 用它来决定问哪几个问题")
 	flag.Parse()
+
+	// -hash-pass：生成 bcrypt 哈希后立刻退出（不启动服务）。
+	// 传 "-" 时从标准输入读一行，这样密码不会留在 shell 历史里。
+	if *hashPass != "" {
+		pw := *hashPass
+		if pw == "-" {
+			sc := bufio.NewScanner(os.Stdin)
+			if sc.Scan() {
+				pw = strings.TrimRight(sc.Text(), "\r\n")
+			}
+		}
+		if pw == "" {
+			fmt.Fprintln(os.Stderr, "密码为空")
+			os.Exit(1)
+		}
+		h, err := bcrypt.GenerateFromPassword([]byte(pw), 10)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "生成失败:", err)
+			os.Exit(1)
+		}
+		fmt.Println(string(h))
+		return
+	}
 
 	// ---------- 命令行里可能带的手工引号，统一在这里收口 ----------
 	// 粘贴路径十有八九会把 "D:\我的 素材" 整段带引号粘进来。
