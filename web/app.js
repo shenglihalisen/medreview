@@ -312,6 +312,12 @@
     if (tk) { S.token = tk; try { localStorage.setItem("mr_token", tk); } catch (e) {} }
     else { try { S.token = localStorage.getItem("mr_token") || ""; } catch (e) {} }
 
+    // 仪表盘深链：?folder=<目录 id>&filter=pending|keep|reject|all
+    // （仪表盘点某个目录的"待审 12"就能直接落到那堆文件上）
+    var qFolder = parseInt(q.get("folder") || "", 10);
+    var qFilter = q.get("filter");
+    if (qFilter && /^(all|pending|keep|reject)$/.test(qFilter)) S.filter = qFilter;
+
     // 列数偏好只在电脑版上读写（手机固定 1 列，不去污染桌面偏好）。
     // localStorage 一律包 try/catch：在存储被禁的上下文里抛异常会让 init 中断，
     // 后面 buildStaticUI()/bindEvents() 全都不会执行 —— 表现就是"所有按钮都没反应"。
@@ -348,12 +354,12 @@
       setupDirtToggle();
 
       loadStatus().then(function () {
-        S.folderId = 1;
+        if (!(qFolder > 0)) S.folderId = 1;
         return loadTree(0);
       }).then(function () {
         renderTree();
-        // 离线演示页可以指定初始目录（DEMO.startFolder），正式页面永远是根目录
-        return selectFolder((DEMO && DEMO.startFolder) || 1);
+        // 初始目录：URL 参数 > 离线演示页的 DEMO.startFolder > 根目录
+        return selectFolder(qFolder > 0 ? qFolder : ((DEMO && DEMO.startFolder) || 1));
       }).catch(function (e) { toast("加载失败: " + e.message + netHint(e)); });
 
       connectSSE();
