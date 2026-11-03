@@ -799,7 +799,7 @@ async function renderAccount() {
       <div class="dwho">当前登录：<b>${esc(d.user || '—')}</b></div>
       <div class="dusers">${users}</div>
     </div>
-    ${d.admin ? '<div class="dadmin" id="adminbox"></div>' : ''}
+    ${(d.admin && d.manage) ? '<div class="dadmin" id="adminbox"></div>' : ''}
     ${d.canChange ? `
     <div class="dpwd">
       <input class="dinput" id="pw-old" type="password" placeholder="当前密码" autocomplete="current-password">
@@ -811,7 +811,7 @@ async function renderAccount() {
     <div class="dnote">当前以 -auth 单账号启动，密码写在启动参数里；想在这里改密码，请改用
       <code>-auth-file users.json</code> 启动。</div>`}
   `;
-  if (d.admin) renderAdminUsers();
+  if (d.admin && d.manage) renderAdminUsers();
   const btn = $('pw-go');
   if (!btn) return;
   btn.onclick = async () => {
