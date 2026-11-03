@@ -1,0 +1,14 @@
+dist/
+local/
+tools/
+_verify/
+web_demo/
+_demo_media/
+*.exe
+*.fpk
+*.zip
+*.db*
+cache/
+.git/
+docs/
+packaging/

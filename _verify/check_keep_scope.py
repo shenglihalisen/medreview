@@ -589,13 +589,21 @@ def main():
         check('目标目录选择器（含新建目录）：不给口令 → 403', bd_no == 403, '实际 %d' % bd_no)
         check('目标目录选择器：给对口令 → 200', bd_ok == 200, '实际 %d' % bd_ok)
 
-        # CORS：只允许本机来源，别让互联网上任意网页读走素材库
+        # CORS：默认放行本机 + 私有网段（前后端分离常用），公网来源一律拒绝
         _, h_ev = resp_of('/api/status', origin='http://evil.example.com')
         _, h_lo = resp_of('/api/status', origin='http://127.0.0.1:31976')
         _, h_ln = resp_of('/api/status', origin='http://localhost:8080')
+        _, h_lan = resp_of('/api/status', origin='http://192.168.1.9:5000')
+        _, h_lan10 = resp_of('/api/status', origin='http://10.0.0.5:8080')
         _, h_no = resp_of('/api/status')
-        check('外部站点的 Origin 拿不到 CORS 许可',
+        check('公网站点的 Origin 拿不到 CORS 许可',
               'access-control-allow-origin' not in h_ev, str(sorted(h_ev)))
+        check('私有网段 192.168.* 放行（前后端分离）',
+              h_lan.get('access-control-allow-origin') == 'http://192.168.1.9:5000',
+              str(h_lan.get('access-control-allow-origin')))
+        check('私有网段 10.* 放行',
+              h_lan10.get('access-control-allow-origin') == 'http://10.0.0.5:8080',
+              str(h_lan10.get('access-control-allow-origin')))
         check('127.0.0.1（预览面板另一个端口）放行',
               h_lo.get('access-control-allow-origin') == 'http://127.0.0.1:31976',
               str(h_lo.get('access-control-allow-origin')))

@@ -51,6 +51,12 @@ func main() {
 	token := flag.String("token", "", "下载页口令；留空则每次启动随机生成")
 	openDL := flag.Bool("open-dl", false, "关闭下载权限校验（任何页面都能打包下载）")
 	allowQueryToken := flag.Bool("allow-query-token", false, "允许用 ?t=口令 鉴权（默认关闭：口令会进浏览器历史/Referer/日志）。需要分享请用一次性分享链接")
+	apiOnly := flag.Bool("api-only", false, "只提供 API，不提供内嵌前端（前后端分离：前端另行托管）")
+	webRoot := flag.String("web-root", "", "用磁盘目录作为前端静态资源（覆盖内嵌 web/，改前端无需重编）")
+	cors := flag.String("cors", "", "额外允许的前端来源，逗号分隔（默认只放行本机 + 私有网段）")
+	corsLAN := flag.Bool("cors-lan", true, "放行私有网段来源（10./172.16-31./192.168.）")
+	adminToken := flag.String("admin-token", "", "管理口令：开启 -allow-remote-admin 后，远端目录枚举/重扫需要它")
+	allowRemoteAdmin := flag.Bool("allow-remote-admin", false, "允许非本机调用目录枚举/重扫（必须同时给 -admin-token）")
 	vjobs := flag.Int("vjobs", 3, "视频预转码并发数，即预热时同时转几个视频")
 	encFlag := flag.String("enc", "", "视频转码编码：cpu=libx264 软编（默认）；nvenc/qsv/amf(仅Windows)=只用指定的这些（逗号分隔，如 nvenc,qsv）；auto=都比速度，快 20%+ 才换")
 	qcFlag := flag.String("qcdec", "", "视频 QC 解码：cpu=软解（默认）；cuda/qsv/vaapi(Linux)/d3d11va(Windows)=只用指定的这些（逗号分隔）；auto=探测后择优")
@@ -199,6 +205,12 @@ func main() {
 		autoClose:  *autoClose,
 		logFile:    *logFile,
 		csvPath:    *csvPath,
+		apiOnly:          *apiOnly,
+		webRoot:          *webRoot,
+		corsOrigins:      splitList(*cors),
+		corsLAN:          *corsLAN,
+		adminToken:       *adminToken,
+		allowRemoteAdmin: *allowRemoteAdmin,
 	}
 
 	a, err := newApp(cfg, logRing500, logFilePath)
@@ -431,4 +443,16 @@ func openBrowser(url string) {
 		}
 	}
 	log.Printf("打开浏览器失败，请手动访问: %s", url)
+}
+
+// splitList 把逗号分隔的来源列表拆干净（去空白、去空项、去尾部斜杠）。
+func splitList(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		p = strings.TrimSpace(strings.TrimRight(p, "/"))
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

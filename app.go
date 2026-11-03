@@ -34,6 +34,14 @@ type appConfig struct {
 	// 打印时要说明清楚，否则用户看到日志里那串 hex 会以为程序"编造"了口令。
 	openDL     bool   // 关闭下载口令校验
 	allowQueryToken bool // 允许 ?t=口令 鉴权（默认关，见 main.go 的 -allow-query-token）
+
+	// --- 前后端分离（2026-11-03）---
+	apiOnly          bool     // 只出 API，不挂静态前端
+	webRoot          string   // 外置前端目录（覆盖内嵌 web/）
+	corsOrigins      []string // 额外允许的前端来源（-cors 逗号分隔）
+	corsLAN          bool     // 放行私有网段来源（-cors-lan，默认 true）
+	adminToken       string   // 管理口令（远端 browse/scan）
+	allowRemoteAdmin bool     // 允许非本机管理操作（需 adminToken）
 	vjobs      int    // 视频预热并发数
 	qcHW       string // QC 视频解码："cpu"=软解；"cuda"/"qsv"/"d3d11va"=只用那一条；"auto"=探测择优。对应 -qcdec
 	encHW      string // 视频转码编码："cpu"=libx264；"nvenc"/"qsv"/"amf"=只用那一个；"auto"=择优。对应 -enc
@@ -143,6 +151,12 @@ func newApp(cfg appConfig, logs *logRing, logPath string) (*app, error) {
 		dlToken: tok,
 		noToken: cfg.openDL,
 		allowQueryToken: cfg.allowQueryToken,
+		apiOnly:          cfg.apiOnly,
+		webRoot:          cfg.webRoot,
+		corsOrigins:      cfg.corsOrigins,
+		corsLAN:          cfg.corsLAN,
+		adminToken:       cfg.adminToken,
+		allowRemoteAdmin: cfg.allowRemoteAdmin,
 		logs:    logs,
 		logPath: logPath,
 		// 「有没有本地窗口」：gui / wails 版都有，console 版只有黑窗口
