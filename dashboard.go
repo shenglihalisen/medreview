@@ -314,11 +314,49 @@ func (h *Handler) calcFolders() (any, error) {
 	if active < 0 {
 		active = 0
 	}
+	// 各目录进度 Top（待审最多的排前面）：仪表盘要能"一眼看出该从哪堆开始"。
+	// 只取直属文件（不做子树汇总）——与审阅页的"本层"口径保持一致，避免两个页面
+	// 对同一个目录给出不同的数字。
+	type folderProgress struct {
+		FolderID int64  `json:"folderId"`
+		Name     string `json:"name"`
+		RelPath  string `json:"relPath"`
+		Total    int    `json:"total"`
+		Done     int    `json:"done"`
+		Pending  int    `json:"pending"`
+		Claimer  string `json:"claimer"`
+	}
+	var top []folderProgress
+	if rows, err := h.store.db.Query(`
+		SELECT f.id, f.name, f.rel_path,
+		       COUNT(*) AS total,
+		       SUM(CASE WHEN COALESCE(r.decision,0) <> 0 THEN 1 ELSE 0 END) AS done,
+		       COALESCE(c.user_name, '') AS claimer
+		FROM file fi
+		JOIN folder f ON f.id = fi.folder_id
+		LEFT JOIN review r ON r.file_id = fi.id
+		LEFT JOIN claim c ON c.folder_id = f.id
+		WHERE fi.present = 1
+		GROUP BY f.id
+		HAVING COUNT(*) > SUM(CASE WHEN COALESCE(r.decision,0) <> 0 THEN 1 ELSE 0 END)
+		ORDER BY (COUNT(*) - SUM(CASE WHEN COALESCE(r.decision,0) <> 0 THEN 1 ELSE 0 END)) DESC, COUNT(*) DESC
+		LIMIT 8`); err == nil {
+		for rows.Next() {
+			var fp folderProgress
+			if rows.Scan(&fp.FolderID, &fp.Name, &fp.RelPath, &fp.Total, &fp.Done, &fp.Claimer) == nil {
+				fp.Pending = fp.Total - fp.Done
+				top = append(top, fp)
+			}
+		}
+		rows.Close()
+	}
+
 	return map[string]any{
 		"total": total, "claimed": active,
 		"unclaimed": total - active,
 		"stale":     len(staleList),
 		"staleList": staleList,
+		"top":       top,
 	}, nil
 }
 
