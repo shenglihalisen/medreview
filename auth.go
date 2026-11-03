@@ -409,6 +409,7 @@ func (h *Handler) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 		"users":     names,
 		"canChange": h.authCfg.UsersPath != "",
 		"admin":     h.isAdmin(me),
+		"manage":    h.authCfg.UsersPath != "",
 	})
 }
 

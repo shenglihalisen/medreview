@@ -53,6 +53,8 @@ type appConfig struct {
 	tlsKey     string // -tls-key
 	publicMode bool   // -public：强制认证 + 安全默认值
 	admins     string // -admin 逗号分隔的超管名单
+	adminUser  string // -admin-user：启动时问密码的唯一超管
+	adminHash  string // 上面那个账号的 bcrypt 哈希（内存态，不落盘）
 	vjobs      int    // 视频预热并发数
 	qcHW       string // QC 视频解码："cpu"=软解；"cuda"/"qsv"/"d3d11va"=只用那一条；"auto"=探测择优。对应 -qcdec
 	encHW      string // 视频转码编码："cpu"=libx264；"nvenc"/"qsv"/"amf"=只用那一个；"auto"=择优。对应 -enc
@@ -177,6 +179,23 @@ func newApp(cfg appConfig, logs *logRing, logPath string) (*app, error) {
 	if err != nil {
 		return nil, err
 	}
+	// -admin-user：用启动时输入的密码覆盖该账号，并**只保留这一个超管**
+	// （用户明确要求"只要一个"；文件里的其他超管会被清掉，日志里说明）
+	if a.cfg.adminUser != "" {
+		if authCfg.Users == nil {
+			authCfg.Users = map[string]string{}
+		}
+		if authCfg.Admins == nil {
+			authCfg.Admins = map[string]bool{}
+		}
+		if len(authCfg.Admins) > 0 {
+			log.Printf("-admin-user 生效：本次只保留超管 %q，忽略 users.json 里的其他超管", a.cfg.adminUser)
+		}
+		authCfg.Users[a.cfg.adminUser] = a.cfg.adminHash
+		authCfg.Admins = map[string]bool{a.cfg.adminUser: true}
+		authCfg.Enabled = true
+	}
+
 	a.h.authCfg = authCfg
 	a.h.auth = newAuthState(authCfg)
 	a.cfg.publicMode = a.cfg.publicMode || authCfg.Enabled

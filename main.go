@@ -68,6 +68,7 @@ func main() {
 	tlsKey := flag.String("tls-key", "", "直接提供 HTTPS 时的私钥路径")
 	publicMode := flag.Bool("public", false, "公网模式：强制认证 + 安全默认值（需配合 -auth/-auth-file）")
 	adminsFlag := flag.String("admin", "", "超管名单，逗号分隔（这些账号可在仪表盘里管理其他用户）")
+	adminUser := flag.String("admin-user", "", "启动时交互输入该账号的超管密码（不回显）；只保留这一个超管")
 	hashPass := flag.String("hash-pass", "", "只输出该密码的 bcrypt 哈希（写 -auth-file 用），然后退出；用 -hash-pass - 可从标准输入读，避免进 shell 历史")
 	vjobs := flag.Int("vjobs", 3, "视频预转码并发数，即预热时同时转几个视频")
 	encFlag := flag.String("enc", "", "视频转码编码：cpu=libx264 软编（默认）；nvenc/qsv/amf(仅Windows)=只用指定的这些（逗号分隔，如 nvenc,qsv）；auto=都比速度，快 20%+ 才换")
@@ -222,11 +223,30 @@ func main() {
 	webFS = sub
 
 	// 公网模式必须配账号，否则等于把"无鉴权的素材库"直接挂到公网上
-	if *publicMode && *authSingle == "" && *authFile == "" {
-		fatalf("-public 需要同时提供 -auth user:password 或 -auth-file users.json（否则没有登录保护）")
+	if *publicMode && *authSingle == "" && *authFile == "" && *adminUser == "" {
+		fatalf("-public 需要 -auth user:password、-auth-file users.json 或 -admin-user <名字>（否则没有登录保护）")
 	}
 	if (*tlsCert == "") != (*tlsKey == "") {
 		fatalf("-tls-cert 与 -tls-key 必须成对提供")
+	}
+
+	// 超管密码：每次启动在命令行问（不回显），只保留这一个超管。
+	var adminHash string
+	var adminName string
+	if n := strings.TrimSpace(*adminUser); n != "" {
+		pw, err := promptPassword("请输入超管 \"" + n + "\" 的密码（至少 8 位，输入不回显）: ")
+		if err != nil {
+			fatalf("读取密码失败: %v", err)
+		}
+		if len([]rune(pw)) < 8 {
+			fatalf("超管密码至少 8 位")
+		}
+		h, err := bcrypt.GenerateFromPassword([]byte(pw), 10)
+		if err != nil {
+			fatalf("生成密码哈希失败: %v", err)
+		}
+		adminHash = string(h)
+		adminName = n
 	}
 
 	cfg := appConfig{
@@ -262,6 +282,8 @@ func main() {
 		tlsKey:           *tlsKey,
 		publicMode:       *publicMode,
 		admins:           *adminsFlag,
+		adminUser:        adminName,
+		adminHash:        adminHash,
 	}
 
 	a, err := newApp(cfg, logRing500, logFilePath)
