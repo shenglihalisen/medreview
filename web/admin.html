@@ -879,6 +879,7 @@ async function loadFull() {
 //   - 超过 60 秒没动静 → 判定连接已死，主动重连（比定时轮询省得多）
 var lastEventAt = 0;
 var STALE_SEC = 60;
+var loadingNow = false;      // loadFull 防重入（曾因漏声明导致整页白屏）
 
 function reconnectEvents() {
   try { if (window.__es) window.__es.close(); } catch (e) {}
@@ -979,6 +980,12 @@ async function forceRelease(folderId, owner) {
     alert('释放失败：' + err.message);
   }
 }
+
+// ---------- 启动 ----------
+// 先拉一次全量（首屏不依赖推送），再连事件流；之后一切靠推送。
+bindRefreshButton();
+loadFull();
+connectEvents();
 </script>
 </body>
 </html>
