@@ -300,6 +300,9 @@ func main() {
 		adminHash:        adminHash,
 	}
 
+	// 上次会话若勾过「已完成全部」，先把没清干净的补清掉（强杀场景）
+	maybeCleanupOnStart(cfg)
+
 	a, err := newApp(cfg, logRing500, logFilePath)
 	if err != nil {
 		fatalf("初始化失败: %v", err)
