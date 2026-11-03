@@ -124,6 +124,7 @@ medreview -api-only -addr 0.0.0.0:8080 -root /media -db /data/medreview.db
 - **跨源下载**：用 `Authorization: Bearer <下载口令>`（跨源 cookie 不可靠）。
 - **Docker**：`docker build -t medreview .`，素材挂到 `/media`（只读）、数据挂 `/data`。
 - **公网模式（内置认证）**：`-public -auth 用户名:密码` 启用登录页 + 签名会话 + 登录限流 + CSRF 校验 + 审计日志（JSONL）；配合 `-tls-cert/-tls-key` 可直接跑 HTTPS。不需要反代也能挡住匿名访问。
+- **账号怎么设**：单账号 `-auth 用户名:密码` 即可；多账号用 `medreview -hash-pass -`（从标准输入读密码，不进 shell 历史）生成 bcrypt 哈希，写进 `users.json`：`{"users":{"alice":"$2a$10$..."}}`，启动加 `-auth-file users.json`。改账号需重启；固定 `-session-key` 可让重启后不用重新登录。
 - ⚠️ **公网部署前必读** [`docs/design/public-deployment.md`](docs/design/public-deployment.md)：媒体接口本身无鉴权，必须有认证层（内置 `-public` 或反向代理）。
 
 ## 3. 架构与源码结构
@@ -452,6 +453,7 @@ medreview -api-only -addr 0.0.0.0:8080 -root /media -db /data/medreview.db
 - **Cross-origin downloads**: use `Authorization: Bearer <download-token>` (cookies are unreliable cross-origin).
 - **Docker**: `docker build -t medreview .`; mount media read-only at `/media` and data at `/data`.
 - **Public mode (built-in auth)**: `-public -auth user:password` enables a login page, signed sessions, login rate limiting, CSRF checks, and a JSONL audit log; add `-tls-cert/-tls-key` to serve HTTPS directly. Anonymous access is blocked without a reverse proxy.
+- **Accounts**: a single account is just `-auth user:password`. For multiple accounts, run `medreview -hash-pass -` (reads the password from stdin so it stays out of shell history), put the bcrypt hashes into `users.json` as `{"users":{"alice":"$2a$10$..."}}`, and start with `-auth-file users.json`. Changes require a restart; pin `-session-key` to keep sessions valid across restarts.
 - ⚠️ **Read [`docs/design/public-deployment.md`](docs/design/public-deployment.md) before exposing it to the internet**: media endpoints are unauthenticated by design, so some auth layer (built-in `-public` or a reverse proxy) is mandatory.
 
 ## 3. Architecture and source layout

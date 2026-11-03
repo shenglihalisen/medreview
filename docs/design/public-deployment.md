@@ -122,8 +122,31 @@ medreview -public \
 | 权限 | 已登录 = 有下载权限、可用目录枚举/重扫（不用再配 `-admin-token`） |
 | 审计 | `-audit-log` 追加 JSONL：时间、IP、用户、动作、结果、UA |
 
-多账号：`-auth-file users.json`，格式 `{"users":{"alice":"$2a$..."}}`，哈希用
-`htpasswd -bnBC 10 "" '密码' | tr -d ':\n'` 或 `python -c "import bcrypt;print(bcrypt.hashpw(b'密码',bcrypt.gensalt(10)).decode())"`。
+**账号怎么设**
+
+```bash
+# ① 单账号（最简单，密码只存在于进程内存）
+medreview -public -auth alice:'你的密码' -session-key "$(openssl rand -hex 32)" ...
+
+# ② 多账号：先生成 bcrypt 哈希（-hash-pass - 从 stdin 读，避免进 shell 历史）
+medreview -hash-pass -
+# 输入密码 → 输出形如 $2a$10$xxxx...
+
+# 写成 users.json（只放哈希，不放明文）
+cat > users.json <<'JSON'
+{"users":{"alice":"$2a$10$...","bob":"$2a$10$..."}}
+JSON
+chmod 600 users.json
+
+medreview -public -auth-file users.json -session-key "$(openssl rand -hex 32)" ...
+```
+
+Windows 下注意引号：`.\medreview.exe -public -auth 'alice:p@ss' -session-key '0123...'`；
+多账号同样先跑 `.\medreview.exe -hash-pass -`，再把哈希写进 `users.json`。
+
+- 改账号或密码：改文件/参数后**重启**服务
+- 固定 `-session-key`：重启后已登录的浏览器不会被踢；不固定则每次启动随机
+- `users.json` 权限建议 600；它只含哈希，仍然不要提交到仓库
 
 **局限（想清楚再上）**：进程内计数（重启清零）；没有 2FA / 密码找回 / 用户管理界面；
 会话密钥不指定就每次启动随机（重启要重新登录）。需要这些能力时，还是上 Authelia / OAuth2-Proxy。
