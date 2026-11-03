@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>登录 · medreview</title>
+<link rel="stylesheet" href="style.css">
+<style>
+  body { display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+  .login-box { width: min(92vw, 360px); padding: 28px 24px; border-radius: 14px;
+               background: #141b24; border: 1px solid #26313d; box-shadow: 0 12px 40px rgba(0,0,0,.45); }
+  .login-box h1 { font-size: 18px; margin: 0 0 4px; }
+  .login-box p.sub { color: #8a97a6; font-size: 12px; margin: 0 0 18px; }
+  .login-box label { display: block; font-size: 13px; color: #a9b4c2; margin: 12px 0 6px; }
+  .login-box input { width: 100%; box-sizing: border-box; padding: 9px 10px; border-radius: 8px;
+                     border: 1px solid #33404f; background: #0f1419; color: #e6edf3; font-size: 14px; }
+  .login-box button { width: 100%; margin-top: 18px; padding: 10px; border-radius: 8px; border: 0;
+                      background: #2f81f7; color: #fff; font-size: 14px; cursor: pointer; }
+  .login-box button:disabled { opacity: .6; cursor: default; }
+  .err { color: #ff7b72; font-size: 13px; min-height: 18px; margin-top: 10px; }
+</style>
+</head>
+<body>
+  <form class="login-box" id="f">
+    <h1>medreview 素材审阅</h1>
+    <p class="sub">Sign in to continue · 请登录后使用</p>
+    <label for="u">用户名 / Username</label>
+    <input id="u" name="user" autocomplete="username" required>
+    <label for="p">密码 / Password</label>
+    <input id="p" name="password" type="password" autocomplete="current-password" required>
+    <button id="go" type="submit">登录</button>
+    <div class="err" id="err"></div>
+  </form>
+<script>
+(function () {
+  var f = document.getElementById("f"), err = document.getElementById("err"), go = document.getElementById("go");
+  var next = new URLSearchParams(location.search).get("next") || "/home.html";
+  f.addEventListener("submit", function (e) {
+    e.preventDefault();
+    err.textContent = ""; go.disabled = true;
+    fetch("api/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user: document.getElementById("u").value, password: document.getElementById("p").value })
+    }).then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { return { ok: r.ok, j: j }; }); })
+      .then(function (res) {
+        if (res.ok) { location.href = next; return; }
+        err.textContent = res.j.error || "登录失败";
+        go.disabled = false;
+      })
+      .catch(function () { err.textContent = "网络错误，请重试"; go.disabled = false; });
+  });
+})();
+</script>
+</body>
+</html>

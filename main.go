@@ -57,6 +57,13 @@ func main() {
 	corsLAN := flag.Bool("cors-lan", true, "放行私有网段来源（10./172.16-31./192.168.）")
 	adminToken := flag.String("admin-token", "", "管理口令：开启 -allow-remote-admin 后，远端目录枚举/重扫需要它")
 	allowRemoteAdmin := flag.Bool("allow-remote-admin", false, "允许非本机调用目录枚举/重扫（必须同时给 -admin-token）")
+	authSingle := flag.String("auth", "", "公网模式：内置账号 user:password（启用登录与会话）")
+	authFile := flag.String("auth-file", "", `公网模式：多账号文件 {"users":{"alice":"$2a$..."}}（bcrypt）`)
+	sessionKey := flag.String("session-key", "", "会话签名密钥（十六进制，>=32 位）；不填则每次启动随机")
+	auditLog := flag.String("audit-log", "", "审计日志路径（JSONL）；公网模式建议启用")
+	tlsCert := flag.String("tls-cert", "", "直接提供 HTTPS 时的证书路径（.pem）")
+	tlsKey := flag.String("tls-key", "", "直接提供 HTTPS 时的私钥路径")
+	publicMode := flag.Bool("public", false, "公网模式：强制认证 + 安全默认值（需配合 -auth/-auth-file）")
 	vjobs := flag.Int("vjobs", 3, "视频预转码并发数，即预热时同时转几个视频")
 	encFlag := flag.String("enc", "", "视频转码编码：cpu=libx264 软编（默认）；nvenc/qsv/amf(仅Windows)=只用指定的这些（逗号分隔，如 nvenc,qsv）；auto=都比速度，快 20%+ 才换")
 	qcFlag := flag.String("qcdec", "", "视频 QC 解码：cpu=软解（默认）；cuda/qsv/vaapi(Linux)/d3d11va(Windows)=只用指定的这些（逗号分隔）；auto=探测后择优")
@@ -186,6 +193,14 @@ func main() {
 	}
 	webFS = sub
 
+	// 公网模式必须配账号，否则等于把"无鉴权的素材库"直接挂到公网上
+	if *publicMode && *authSingle == "" && *authFile == "" {
+		fatalf("-public 需要同时提供 -auth user:password 或 -auth-file users.json（否则没有登录保护）")
+	}
+	if (*tlsCert == "") != (*tlsKey == "") {
+		fatalf("-tls-cert 与 -tls-key 必须成对提供")
+	}
+
 	cfg := appConfig{
 		root:       *root,
 		addr:       *addr,
@@ -211,6 +226,13 @@ func main() {
 		corsLAN:          *corsLAN,
 		adminToken:       *adminToken,
 		allowRemoteAdmin: *allowRemoteAdmin,
+		authSingle:       *authSingle,
+		authFile:         *authFile,
+		sessionKey:       *sessionKey,
+		auditPath:        *auditLog,
+		tlsCert:          *tlsCert,
+		tlsKey:           *tlsKey,
+		publicMode:       *publicMode,
 	}
 
 	a, err := newApp(cfg, logRing500, logFilePath)

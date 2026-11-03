@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -42,6 +43,15 @@ type appConfig struct {
 	corsLAN          bool     // 放行私有网段来源（-cors-lan，默认 true）
 	adminToken       string   // 管理口令（远端 browse/scan）
 	allowRemoteAdmin bool     // 允许非本机管理操作（需 adminToken）
+
+	// --- 公网模式（2026-11-03）---
+	authSingle string // -auth user:pass
+	authFile   string // -auth-file users.json
+	sessionKey string // -session-key 十六进制
+	auditPath  string // -audit-log 路径
+	tlsCert    string // -tls-cert
+	tlsKey     string // -tls-key
+	publicMode bool   // -public：强制认证 + 安全默认值
 	vjobs      int    // 视频预热并发数
 	qcHW       string // QC 视频解码："cpu"=软解；"cuda"/"qsv"/"d3d11va"=只用那一条；"auto"=探测择优。对应 -qcdec
 	encHW      string // 视频转码编码："cpu"=libx264；"nvenc"/"qsv"/"amf"=只用那一个；"auto"=择优。对应 -enc
@@ -162,6 +172,17 @@ func newApp(cfg appConfig, logs *logRing, logPath string) (*app, error) {
 		// 「有没有本地窗口」：gui / wails 版都有，console 版只有黑窗口
 		gui: buildMode != "console",
 	}
+	authCfg, err := loadAuthConfig(a.cfg.authSingle, a.cfg.authFile, a.cfg.sessionKey, a.cfg.auditPath, a.cfg.tlsCert != "" || a.cfg.publicMode)
+	if err != nil {
+		return nil, err
+	}
+	a.h.authCfg = authCfg
+	a.h.auth = newAuthState(authCfg)
+	a.cfg.publicMode = a.cfg.publicMode || authCfg.Enabled
+	if authCfg.Enabled {
+		log.Printf("认证已启用：%d 个账号，会话 %s，审计=%q", len(authCfg.Users), sessionTTL, a.cfg.auditPath)
+	}
+
 	a.h.startShareGC()
 	// 仪表盘增量推送：先建再接回调，最后启动循环。
 	// 顺序有讲究 —— 回调必须在 Start 之前接好，否则启动那一瞬的转码/QC
@@ -300,6 +321,16 @@ func (a *app) bind() error {
 		}
 		return err
 	}
+	// TLS：给了证书就把 listener 包成 tls，三条服务路径（Serve/serveNow/rebind）不用改
+	if a.cfg.tlsCert != "" && a.cfg.tlsKey != "" {
+		cert, err := tls.LoadX509KeyPair(a.cfg.tlsCert, a.cfg.tlsKey)
+		if err != nil {
+			ln.Close()
+			return fmt.Errorf("加载 TLS 证书失败: %w", err)
+		}
+		ln = tls.NewListener(ln, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
+	}
+
 	a.ln = ln
 	a.computeURLsLocked()
 	a.publishURLsLocked()
