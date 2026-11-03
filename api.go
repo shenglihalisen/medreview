@@ -50,6 +50,7 @@ type Handler struct {
 	authCfg   authConfig
 	auth      *authState
 	loginUser string // 最近一次登录成功的用户名（仅日志/调试用）
+	markerDBPath string // 「已完成全部」引子定位用的 db 路径
 
 	// --- 网页控制台用（无黑窗版没有命令行窗口，地址/口令/日志只能在网页里看）---
 	logs        *logRing // 日志环形缓冲，给 /api/console 增量拉
@@ -301,6 +302,8 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /api/health", h.handleHealth)
 	mux.HandleFunc("POST /api/login", h.handleLogin)
 	mux.HandleFunc("POST /api/logout", h.handleLogout)
+	mux.HandleFunc("GET /api/session/done", h.handleSessionDoneGet)
+	mux.HandleFunc("POST /api/session/done", h.handleSessionDoneSet)
 	mux.HandleFunc("GET /api/auth/me", h.handleAuthMe)
 	mux.HandleFunc("POST /api/auth/password", h.handleChangePassword)
 	mux.HandleFunc("GET /api/admin/users", h.handleAdminUsers)
@@ -1700,3 +1703,33 @@ func bearerToken(r *http.Request) string {
 	}
 	return ""
 }
+
+// handleSessionDoneGet / handleSessionDoneSet 「已完成全部」勾选状态（引子）。
+// 引子文件里只有固定字符串，不含任何敏感信息；具体清理在退出/下次启动执行。
+func (h *Handler) handleSessionDoneGet(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]any{"done": sessionDone(h.dbPathForMarker())})
+}
+
+func (h *Handler) handleSessionDoneSet(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Done bool `json:"done"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&req); err != nil {
+		http.Error(w, "请求格式错误", http.StatusBadRequest)
+		return
+	}
+	if err := setSessionDone(h.dbPathForMarker(), req.Done); err != nil && !os.IsNotExist(err) {
+		http.Error(w, "写入引子失败", http.StatusInternalServerError)
+		return
+	}
+	user := h.sessionUser(r)
+	action := "session-done-on"
+	if !req.Done {
+		action = "session-done-off"
+	}
+	h.auth.logAudit(r, user, action, "ok")
+	writeJSON(w, map[string]any{"ok": true, "done": req.Done})
+}
+
+// dbPathForMarker Handler 上没有 db 路径（在 store 里），用配置透传。
+func (h *Handler) dbPathForMarker() string { return h.markerDBPath }

@@ -30,7 +30,6 @@ read -r ADMINS
 
 if [ "$ADMINS" != "0" ]; then
   export MEDREVIEW_ADMINS="$ADMINS"
-  export MEDREVIEW_EPHEMERAL=1      # 只在本次运行有效，正常退出即删除
   "$BIN" -setup -db "$PWD/medreview.db"
 fi
 

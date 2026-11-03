@@ -170,6 +170,7 @@ func newApp(cfg appConfig, logs *logRing, logPath string) (*app, error) {
 		corsLAN:          cfg.corsLAN,
 		adminToken:       cfg.adminToken,
 		allowRemoteAdmin: cfg.allowRemoteAdmin,
+		markerDBPath: cfg.dbPath,
 		logs:    logs,
 		logPath: logPath,
 		// 「有没有本地窗口」：gui / wails 版都有，console 版只有黑窗口
@@ -322,9 +323,17 @@ func (a *app) Close() {
 		exportReviewCSV(reviewCSVMakePath(a.cfg.dbPath, a.cfg.csvPath), a.db)
 		_ = a.db.Close()
 	}
-	// 临时超管凭据：正常退出就删掉（下次启动重新配置）。
-	// 只删自己写的那份 users.json，不碰用户用 -auth-file 指定的持久文件（除非它本身标了 ephemeral）。
-	cleanupEphemeralAuth(a.h)
+	// 「已完成全部」引子：勾过就清理密码与审阅数据；没勾不动。
+	if sessionDone(a.cfg.dbPath) {
+		authPath := ""
+		if a.h != nil {
+			authPath = a.h.authCfg.UsersPath
+		}
+		cleanupCompletedSession(a.cfg, authPath)
+	} else {
+		// 旧机制兜底：临时超管（users.json 标了 ephemeral）退出即删
+		cleanupEphemeralAuth(a.h)
+	}
 
 	// 退出清库：默认的临时库（没显式写 -db）连 medreview.db / -wal / -shm 一起删；
 	// 显式指定了 -db 的不删，跨重启保留（审阅记录和历史批注名都在里面）。

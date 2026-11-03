@@ -350,6 +350,7 @@
 
       buildStaticUI();
       bindEvents();
+      setupDoneToggle();
       setupGuides();
       setupDirtToggle();
 
@@ -2071,6 +2072,41 @@
   }
 
   // ---------- 事件绑定 ----------
+  // 「已完成全部」勾选框：勾上=留引子（退出清理密码与审阅数据），
+  // 取消勾选=删引子（退出保留数据）。引子内容不含敏感信息。
+  function setupDoneToggle() {
+    var cb = $("done-all");
+    if (!cb) return;
+    fetch(U("/api/session/done"), { cache: "no-store" }).then(function (r) {
+      return r.json();
+    }).then(function (d) {
+      cb.checked = !!(d && d.done);
+    }).catch(function () {});
+
+    cb.onchange = function () {
+      var want = cb.checked;
+      cb.checked = !want;               // 先回到原状态，等确认后再落定
+      var apply = function () {
+        fetch(U("/api/session/done"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ done: want })
+        }).then(function (r) {
+          if (!r.ok) throw new Error("HTTP " + r.status);
+          cb.checked = want;
+          toast(want ? "已记录：关闭时清理密码与审阅数据" : "已取消：关闭时保留数据");
+        }).catch(function (e) {
+          toast("设置失败：" + e.message);
+        });
+      };
+      if (want) {
+        confirmDo("勾选「已完成全部」后，关闭服务时会<b>清理超管密码与审阅记录</b>，下次启动是全新状态。确定吗？", apply);
+      } else {
+        apply();
+      }
+    };
+  }
+
   function bindEvents() {
     var lbClose = $("lb-close");
     if (lbClose) lbClose.onclick = closeLightbox;
