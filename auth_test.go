@@ -1,6 +1,11 @@
 package main
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,22 +17,57 @@ import (
 func TestSessionSignVerify(t *testing.T) {
 	key := []byte("0123456789abcdef0123456789abcdef")
 	exp := time.Now().Add(time.Hour)
-	tok := signSession(key, "alice", exp)
-	if got := verifySession(key, tok); got != "alice" {
-		t.Fatalf("正常 token 应返回 alice，实际 %q", got)
+	fp := pwFingerprint("$2a$10$abcdefghijklmnopqrstuv")
+	tok := signSession(key, "alice", exp, fp)
+	if got, gotFP := verifySession(key, tok); got != "alice" || gotFP != fp {
+		t.Fatalf("正常 token 应返回 alice/%s，实际 %q/%q", fp, got, gotFP)
 	}
 	// 篡改载荷
-	if got := verifySession(key, "x"+tok); got != "" {
+	if got, _ := verifySession(key, "x"+tok); got != "" {
 		t.Fatalf("篡改后应失效，实际 %q", got)
 	}
 	// 换密钥
-	if got := verifySession([]byte("ffffffffffffffffffffffffffffffff"), tok); got != "" {
+	if got, _ := verifySession([]byte("ffffffffffffffffffffffffffffffff"), tok); got != "" {
 		t.Fatalf("换密钥后应失效，实际 %q", got)
 	}
 	// 过期
-	old := signSession(key, "alice", time.Now().Add(-time.Minute))
-	if got := verifySession(key, old); got != "" {
+	old := signSession(key, "alice", time.Now().Add(-time.Minute), fp)
+	if got, _ := verifySession(key, old); got != "" {
 		t.Fatalf("过期 token 应失效，实际 %q", got)
+	}
+	// 旧格式（没有密码指纹的两段载荷）一律不认
+	legacy := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf("alice|%d", exp.Unix())))
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(fmt.Sprintf("alice|%d", exp.Unix())))
+	legacy += "." + hex.EncodeToString(mac.Sum(nil))
+	if got, _ := verifySession(key, legacy); got != "" {
+		t.Fatalf("旧格式 token 应失效，实际 %q", got)
+	}
+}
+
+// 改密码后旧会话必须失效：同一张 Cookie 不能再登进去。
+func TestSessionInvalidatedOnPasswordChange(t *testing.T) {
+	key := []byte("0123456789abcdef0123456789abcdef")
+	oldHash := "$2a$10$oldoldoldoldoldoldoldold"
+	h := &Handler{
+		authCfg: authConfig{Enabled: true, SessionKey: key, Users: map[string]string{"alice": oldHash}},
+		auth:    newAuthState(authConfig{}),
+	}
+	tok := signSession(key, "alice", time.Now().Add(time.Hour), pwFingerprint(oldHash))
+	req := httptest.NewRequest("GET", "/api/auth/me", nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: tok})
+	if got := h.sessionUser(req); got != "alice" {
+		t.Fatalf("密码未变时应保持登录，实际 %q", got)
+	}
+	// 模拟改密码
+	h.authCfg.Users["alice"] = "$2a$10$newnewnewnewnewnewnewnew"
+	if got := h.sessionUser(req); got != "" {
+		t.Fatalf("改密码后旧会话应失效，实际 %q", got)
+	}
+	// 模拟删账号
+	delete(h.authCfg.Users, "alice")
+	if got := h.sessionUser(req); got != "" {
+		t.Fatalf("删账号后旧会话应失效，实际 %q", got)
 	}
 }
 
@@ -87,12 +127,13 @@ func TestAuthWrapGate(t *testing.T) {
 // 已登录但跨站 POST 必须被拒（CSRF 兜底）。
 func TestAuthWrapCSRF(t *testing.T) {
 	key := []byte("0123456789abcdef0123456789abcdef")
-	h := &Handler{authCfg: authConfig{Enabled: true, SessionKey: key, Users: map[string]string{}}, auth: newAuthState(authConfig{})}
+	hash := "$2a$10$abcdefghijklmnopqrstuv"
+	h := &Handler{authCfg: authConfig{Enabled: true, SessionKey: key, Users: map[string]string{"alice": hash}}, auth: newAuthState(authConfig{})}
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
 	wrapped := h.authWrap(next)
 
 	req := httptest.NewRequest("POST", "/api/review", nil)
-	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: signSession(key, "alice", time.Now().Add(time.Hour))})
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: signSession(key, "alice", time.Now().Add(time.Hour), pwFingerprint(hash))})
 	req.Header.Set("Origin", "http://evil.example")
 	rec := httptest.NewRecorder()
 	wrapped.ServeHTTP(rec, req)

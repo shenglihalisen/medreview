@@ -1,8 +1,8 @@
 # medreview 后端镜像（headless，前后端分离推荐）
 #
-#   docker build -t medreview:1.2.0 .
+#   docker build -t medreview:latest .
 #   docker run -d --name medreview -p 8080:8080 \
-#     -v /srv/photos:/media:ro -v medreview-data:/data medreview:1.2.0
+#     -v /srv/photos:/media:ro -v medreview-data:/data medreview:latest
 #
 # 说明：
 #  - 用 slim 标签构建（不内嵌 ffmpeg），运行时由 apt 提供 ffmpeg / ImageMagick；

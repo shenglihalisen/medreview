@@ -2074,10 +2074,15 @@
   // ---------- 事件绑定 ----------
   // 「已完成全部」勾选框：勾上=留引子（退出清理密码与审阅数据），
   // 取消勾选=删引子（退出保留数据）。引子内容不含敏感信息。
+  //
+  // 前后端分离（?api=）时必须带 Bearer，否则请求打到后端是未认证的 401 ——
+  // 表现是勾选框每次刷新都回到未勾、点一下弹"设置失败"。这个接口不是普通查询，
+  // 漏了鉴权头不会像图片那样只是不显示，而是**看起来能用实际没生效**。
   function setupDoneToggle() {
     var cb = $("done-all");
     if (!cb) return;
-    fetch(U("/api/session/done"), { cache: "no-store" }).then(function (r) {
+    fetch(U("/api/session/done"), { cache: "no-store", headers: authHeaders() }).then(function (r) {
+      if (!r.ok) throw new Error("HTTP " + r.status);
       return r.json();
     }).then(function (d) {
       cb.checked = !!(d && d.done);
@@ -2089,7 +2094,7 @@
       var apply = function () {
         fetch(U("/api/session/done"), {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: authHeaders({ "Content-Type": "application/json" }),
           body: JSON.stringify({ done: want })
         }).then(function (r) {
           if (!r.ok) throw new Error("HTTP " + r.status);

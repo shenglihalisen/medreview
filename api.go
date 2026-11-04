@@ -1710,7 +1710,39 @@ func (h *Handler) handleSessionDoneGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"done": sessionDone(h.dbPathForMarker())})
 }
 
+// requireSessionControl 限制"谁能改会话引子"。
+//
+// 引子的含义是"退出时把密码和审阅数据都删掉"，是不可逆的破坏性动作，
+// 所以不能像普通查询那样谁都能触发：
+//   - 启用认证：必须已登录（authWrap 已经拦过，这里再断言一次，
+//     免得以后有人把这条路由挪到免认证名单里，静默地重新开个洞）；
+//   - 未启用认证（局域网模式）：只认本机直连，或持主口令的人
+//     （登录过下载页就有 mr_dl Cookie；前后端分离时带 Bearer）。
+//     否则同一个 Wi-Fi 下任何人 POST 一个 {"done":true}，运维一关服务
+//     整轮审阅记录就没了 —— 连痕迹都不好查。
+//   - -open-dl（noToken）本来就是显式选择的"不设防"，masterAuthorized 恒真，
+//     行为保持不变。
+func (h *Handler) requireSessionControl(w http.ResponseWriter, r *http.Request) bool {
+	if h.authEnabled() {
+		if h.sessionUser(r) != "" {
+			return true
+		}
+		writeJSONStatus(w, http.StatusUnauthorized, map[string]any{"error": "请先登录"})
+		return false
+	}
+	if isLoopback(r) || h.masterAuthorized(r) {
+		return true
+	}
+	writeJSONStatus(w, http.StatusForbidden, map[string]any{
+		"error": "「已完成全部」只能由运行服务的这台电脑、或持主口令的人设置",
+	})
+	return false
+}
+
 func (h *Handler) handleSessionDoneSet(w http.ResponseWriter, r *http.Request) {
+	if !h.requireSessionControl(w, r) {
+		return
+	}
 	var req struct {
 		Done bool `json:"done"`
 	}
