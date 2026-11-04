@@ -27,12 +27,14 @@ func markerPath(dbPath string) string {
 }
 
 // setSessionDone 写/删引子。
+// 0600：内容虽然只是一句 "done"，但"这台机器上跑过审阅、并且决定清库"本身
+// 也属于不该让别的系统用户随便看到的运行痕迹。
 func setSessionDone(dbPath string, done bool) error {
 	p := markerPath(dbPath)
 	if !done {
 		return os.Remove(p)
 	}
-	return os.WriteFile(p, []byte(sessionDoneContent), 0o644)
+	return os.WriteFile(p, []byte(sessionDoneContent), 0o600)
 }
 
 // sessionDone 读引子：文件存在 = 上次/本次已选择"完成后清理"。
@@ -66,9 +68,14 @@ func cleanupCompletedSession(cfg appConfig, authFilePath string) {
 		cfg.dbPath,
 		cfg.dbPath+"-wal",
 		cfg.dbPath+"-shm",
-		reviewCSVMakePath(cfg.dbPath, cfg.csvPath),
-		markerPath(cfg.dbPath),
 	)
+	// CSV 只在"自动导出"（-csv 留空，路径由库名推导）时才删。
+	// 用户显式写了 -csv /some/where/report.csv，那份文件可能就在他自己的交付目录里、
+	// 甚至不在本次会话的临时家当里 —— 删它属于越界，绝不能在"清理会话"名义下做。
+	if strings.TrimSpace(cfg.csvPath) == "" {
+		victims = append(victims, reviewCSVMakePath(cfg.dbPath, cfg.csvPath))
+	}
+	victims = append(victims, markerPath(cfg.dbPath))
 
 	for _, p := range victims {
 		if p == "" {
@@ -82,11 +89,15 @@ func cleanupCompletedSession(cfg appConfig, authFilePath string) {
 
 // maybeCleanupOnStart 启动时兜底：上次如果被强杀没走到退出清理，
 // 这里读引子把没清的补清掉。返回 true 表示执行了清理。
+//
+// 必须把 cfg.authFile 传进去：users.json 不一定在数据库旁边。
+// 自定义 -auth-file 的部署、以及 fnOS 包（密码在 TRIM_PKGETC、库在 TRIM_PKGVAR）
+// 都属于这种情况 —— 只删数据库旁边那份会漏掉真正的密码文件。
 func maybeCleanupOnStart(cfg appConfig) bool {
 	if !sessionDone(cfg.dbPath) {
 		return false
 	}
 	log.Println("检测到上次会话的「已完成」引子，清理密码与审阅数据后全新启动")
-	cleanupCompletedSession(cfg, "")
+	cleanupCompletedSession(cfg, cfg.authFile)
 	return true
 }

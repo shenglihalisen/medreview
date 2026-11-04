@@ -81,3 +81,67 @@ func TestMaybeCleanupOnStartKeepsData(t *testing.T) {
 		t.Fatal("库文件应保留")
 	}
 }
+
+// 启动兜底必须清理**本次实际使用的**密码文件，而不是只清数据库旁边那份。
+// 自定义 -auth-file（以及 fnOS 包里密码在 /etc、库在 /var 的部署）就靠这个。
+func TestMaybeCleanupOnStartCustomAuthFile(t *testing.T) {
+	dir := t.TempDir()
+	dbDir := filepath.Join(dir, "state")
+	etcDir := filepath.Join(dir, "etc")
+	if err := os.MkdirAll(dbDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(etcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	db := filepath.Join(dbDir, "medreview.db")
+	users := filepath.Join(etcDir, "users.json")
+	for _, p := range []string{db, users} {
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := setSessionDone(db, true); err != nil {
+		t.Fatal(err)
+	}
+
+	if !maybeCleanupOnStart(appConfig{dbPath: db, authFile: users}) {
+		t.Fatal("有引子时应清理")
+	}
+	if _, err := os.Stat(users); !os.IsNotExist(err) {
+		t.Fatal("自定义路径的 users.json 应被清理")
+	}
+	if _, err := os.Stat(db); !os.IsNotExist(err) {
+		t.Fatal("库应被清理")
+	}
+	if _, err := os.Stat(markerPath(db)); !os.IsNotExist(err) {
+		t.Fatal("引子应被清理")
+	}
+}
+
+// 显式 -csv 指向的文件不属于本次会话的临时家当，清理时必须留着。
+func TestCleanupCompletedSessionKeepsExplicitCSV(t *testing.T) {
+	dir := t.TempDir()
+	db := filepath.Join(dir, "medreview.db")
+	explicit := filepath.Join(dir, "交付", "清单.csv")
+	if err := os.MkdirAll(filepath.Dir(explicit), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{db, explicit} {
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := setSessionDone(db, true); err != nil {
+		t.Fatal(err)
+	}
+
+	cleanupCompletedSession(appConfig{dbPath: db, csvPath: explicit}, "")
+
+	if _, err := os.Stat(db); !os.IsNotExist(err) {
+		t.Fatal("库应被清理")
+	}
+	if _, err := os.Stat(explicit); err != nil {
+		t.Fatal("显式指定的 CSV 不应被清理")
+	}
+}

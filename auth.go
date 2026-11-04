@@ -103,49 +103,84 @@ func (st *authState) logAudit(r *http.Request, user, action, result string) {
 	st.auditMu.Unlock()
 }
 
+// clientIP 取"真实"客户端 IP，用于登录限流与审计。
+//
+// 反代（nginx / caddy / 宝塔）后面，RemoteAddr 永远是 127.0.0.1 或网关地址。
+// 如果直接拿它当 key，**所有人会被算成同一个 IP**：一个人手滑输错 5 次，
+// 全公司一起被锁 15 分钟。所以当直连方本身是内网/本机（也就是"自己人"）时，
+// 采信它转发的 X-Forwarded-For 第一段 / X-Real-IP。
+//
+// 安全性：只有当连接来源是内网时才看这两个头。公网直连的客户端自己伪造
+// X-Forwarded-For 不会被采信 —— 否则攻击者每次换个假 IP 就能绕过限流。
 func clientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		host = r.RemoteAddr
+	}
+	if ip := net.ParseIP(host); ip != nil && (ip.IsLoopback() || ip.IsPrivate()) {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			first := strings.TrimSpace(strings.Split(xff, ",")[0])
+			if net.ParseIP(first) != nil {
+				return first
+			}
+		}
+		if rip := strings.TrimSpace(r.Header.Get("X-Real-IP")); net.ParseIP(rip) != nil {
+			return rip
+		}
 	}
 	return host
 }
 
 // ---------- 会话签名 ----------
 
-// signSession 生成 "base64(payload).hex(hmac)"。
-func signSession(key []byte, user string, exp time.Time) string {
-	payload := fmt.Sprintf("%s|%d", user, exp.Unix())
+// pwFingerprint 把 bcrypt 哈希折成一个短指纹，放进会话签名里。
+//
+// 为什么要它：会话 Cookie 一旦签出去就长期有效（默认 12 小时）。如果只签
+// "用户名 + 过期时间"，那么**改密码并不能踢掉任何已登录的会话** —— 密码可能
+// 正是因为怀疑泄露才改的，结果攻击者手里那份 Cookie 照样能用，改密码成了心理安慰。
+// 把当前密码哈希的指纹签进去后，密码一变指纹就变，所有旧 Cookie 立刻失效。
+// 哈希本身绝不进 Cookie（bcrypt 哈希可以被离线爆破），只放它的 sha256 前 8 字节。
+func pwFingerprint(hash string) string {
+	if hash == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(hash))
+	return hex.EncodeToString(sum[:8])
+}
+
+// signSession 生成 "base64(payload).hex(hmac)"，payload = user|exp|pw指纹。
+func signSession(key []byte, user string, exp time.Time, pwfp string) string {
+	payload := fmt.Sprintf("%s|%d|%s", user, exp.Unix(), pwfp)
 	mac := hmac.New(sha256.New, key)
 	mac.Write([]byte(payload))
 	return base64.RawURLEncoding.EncodeToString([]byte(payload)) + "." + hex.EncodeToString(mac.Sum(nil))
 }
 
-// verifySession 校验签名与有效期，返回用户名；失败返回空串。
-func verifySession(key []byte, raw string) string {
+// verifySession 校验签名与有效期，返回用户名与密码指纹；失败返回空串。
+func verifySession(key []byte, raw string) (user, pwfp string) {
 	parts := strings.SplitN(raw, ".", 2)
 	if len(parts) != 2 {
-		return ""
+		return "", ""
 	}
 	payload, err := base64.RawURLEncoding.DecodeString(parts[0])
 	if err != nil {
-		return ""
+		return "", ""
 	}
 	mac := hmac.New(sha256.New, key)
 	mac.Write(payload)
 	want := hex.EncodeToString(mac.Sum(nil))
 	if subtle.ConstantTimeCompare([]byte(want), []byte(parts[1])) != 1 {
-		return ""
+		return "", ""
 	}
-	f := strings.SplitN(string(payload), "|", 2)
-	if len(f) != 2 {
-		return ""
+	f := strings.SplitN(string(payload), "|", 3)
+	if len(f) != 3 {
+		return "", ""
 	}
 	var exp int64
 	if _, err := fmt.Sscanf(f[1], "%d", &exp); err != nil || time.Now().Unix() > exp {
-		return ""
+		return "", ""
 	}
-	return f[0]
+	return f[0], f[2]
 }
 
 // ---------- 限流 ----------
@@ -180,6 +215,9 @@ func (st *authState) noteLogin(ip string, ok bool) {
 // ---------- 请求侧 ----------
 
 // sessionUser 从请求里取当前登录用户（未登录返回空串）。
+//
+// 除了验签，还要核对会话里带的密码指纹：密码改过 / 被超管重置过 / 账号被删，
+// 指纹就对不上，旧 Cookie 立即作废。
 func (h *Handler) sessionUser(r *http.Request) string {
 	if h.auth == nil || !h.authCfg.Enabled {
 		return ""
@@ -188,7 +226,36 @@ func (h *Handler) sessionUser(r *http.Request) string {
 	if err != nil {
 		return ""
 	}
-	return verifySession(h.authCfg.SessionKey, c.Value)
+	user, fp := verifySession(h.authCfg.SessionKey, c.Value)
+	if user == "" {
+		return ""
+	}
+	h.auth.usersMu.Lock()
+	hash, ok := h.authCfg.Users[user]
+	h.auth.usersMu.Unlock()
+	if !ok || hash == "" {
+		return "" // 用户已被删除
+	}
+	if subtle.ConstantTimeCompare([]byte(fp), []byte(pwFingerprint(hash))) != 1 {
+		return "" // 密码已变更，旧会话作废
+	}
+	return user
+}
+
+// setSessionCookie 种下登录态。login / 改密码后都要用同一套参数，
+// 免得某处漏了 HttpOnly 或 SameSite。
+func (h *Handler) setSessionCookie(w http.ResponseWriter, user, hash string) {
+	exp := time.Now().Add(sessionTTL)
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookie,
+		Value:    signSession(h.authCfg.SessionKey, user, exp, pwFingerprint(hash)),
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   h.authCfg.Secure,
+		Expires:  exp,
+		MaxAge:   int(sessionTTL.Seconds()),
+	})
 }
 
 // authEnabled 认证是否生效。
@@ -269,17 +336,7 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.auth.noteLogin(ip, true)
-	exp := time.Now().Add(sessionTTL)
-	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookie,
-		Value:    signSession(h.authCfg.SessionKey, req.User, exp),
-		Path:     "/",
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		Secure:   h.authCfg.Secure,
-		Expires:  exp,
-		MaxAge:   int(sessionTTL.Seconds()),
-	})
+	h.setSessionCookie(w, req.User, hash)
 	h.auth.logAudit(r, req.User, "login", "ok")
 	h.mu.Lock()
 	h.loginUser = req.User
@@ -474,6 +531,9 @@ func (h *Handler) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, http.StatusInternalServerError, map[string]any{"error": "写入 users.json 失败: " + err.Error()})
 		return
 	}
+	// 当前这台设备换一张新 Cookie（其他设备上的旧 Cookie 随密码变更一起失效），
+	// 否则用户改完密码会被自己踢回登录页 —— 那既突兀，也容易让人误以为改失败了。
+	h.setSessionCookie(w, me, string(newHash))
 	h.auth.logAudit(r, me, "password-change", "ok")
 	writeJSON(w, map[string]any{"ok": true})
 }

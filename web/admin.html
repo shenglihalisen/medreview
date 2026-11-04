@@ -425,6 +425,37 @@ select.dinput { cursor: pointer; }
 // 事件流驱动刷新（非轮询），见底部 connectEvents。
 const $ = (id) => document.getElementById(id);
 
+// ---------- 后端地址：前后端分离部署 ----------
+// 优先级：?api=http://nas:8080（记进 localStorage） → localStorage["medreview.api"] → 同源。
+// 同源部署时 API_BASE 是空串，下面的 U()/H() 就是恒等变换，不改变原有行为。
+const API_BASE = (function () {
+  const clean = (v) => String(v || '').trim().replace(/\/+$/, '');
+  try {
+    const q = new URLSearchParams(location.search).get('api');
+    if (q) { localStorage.setItem('medreview.api', clean(q)); return clean(q); }
+  } catch (e) {}
+  try {
+    const s = localStorage.getItem('medreview.api');
+    if (s) return clean(s);
+  } catch (e) {}
+  return '';
+})();
+
+function U(p) { return API_BASE + p; }
+
+// 跨源时浏览器不会带上 Cookie，必须用启动时显示/存下的下载口令做 Bearer。
+function H(extra) {
+  const h = extra || {};
+  if (API_BASE) {
+    let tk = '';
+    try { tk = localStorage.getItem('mr_token') || ''; } catch (e) {}
+    if (tk) h['Authorization'] = 'Bearer ' + tk;
+  }
+  return h;
+}
+
+let POLL_MODE = false;   // 跨源时退化为定时拉取（EventSource 带不了 Authorization）
+
 const ICON = {
   folder: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>',
   check:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13l4 4L19 7"/></svg>',
@@ -782,7 +813,7 @@ async function renderAccount() {
   const block = $('acctblock'), box = $('acct'), meta = $('acct-meta');
   let d;
   try {
-    const r = await fetch('/api/auth/me', { cache: 'no-store' });
+    const r = await fetch(U('/api/auth/me'), { cache: 'no-store', headers: H() });
     if (r.status === 404) { block.style.display = 'none'; return; }   // 未启用认证
     if (!r.ok) { block.style.display = 'none'; return; }
     d = await r.json();
@@ -823,9 +854,9 @@ async function renderAccount() {
     if (n1.length < 8) { msg.classList.add('err'); msg.textContent = '新密码至少 8 位'; return; }
     btn.disabled = true;
     try {
-      const r = await fetch('/api/auth/password', {
+      const r = await fetch(U('/api/auth/password'), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: H({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ oldPassword: oldP, newPassword: n1 }),
       });
       const j = await r.json().catch(() => ({}));
@@ -852,7 +883,7 @@ async function renderAdminUsers() {
   if (!box) return;
   let d;
   try {
-    const r = await fetch('/api/admin/users', { cache: 'no-store' });
+    const r = await fetch(U('/api/admin/users'), { cache: 'no-store', headers: H() });
     if (!r.ok) { box.innerHTML = '<div class="dnote">没有超管权限</div>'; return; }
     d = await r.json();
   } catch (e) { box.innerHTML = '<div class="dnote">加载失败：' + esc(e.message) + '</div>'; return; }
@@ -885,8 +916,8 @@ async function renderAdminUsers() {
   const msg = $('du-msg');
   const say = (ok, text) => { msg.className = 'dumsg ' + (ok ? 'ok' : 'err'); msg.textContent = text; };
   const post = async (url, body) => {
-    const r = await fetch(url, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    const r = await fetch(U(url), {
+      method: 'POST', headers: H({ 'Content-Type': 'application/json' }), body: JSON.stringify(body),
     });
     const j = await r.json().catch(() => ({}));
     return { ok: r.ok, status: r.status, j };
@@ -997,7 +1028,7 @@ function applySection(name, data) {
 function touchUpdated() {
   $('dot').className = 'ddot ok';
   lastEventAt = Date.now();
-  $('updated').textContent = '刚刚更新 · 实时';
+  $('updated').textContent = POLL_MODE ? '刚刚同步 · 定时' : '刚刚更新 · 实时';
 }
 
 // ---------- 事件流（唯一的实时数据来源） ----------
@@ -1011,8 +1042,13 @@ function touchUpdated() {
 // 所以不存在"漏了事件导致数字永久停在旧值"的问题。唯一需要补的是本地状态
 // 未知的情况（比如首帧到达前就收到增量），那就退化成拉一次全量。
 function connectEvents() {
+  // 跨源（前后端分离）时 EventSource 发不出 Authorization，浏览器也不允许自定义头；
+  // 把口令塞进 URL（?t=）会进访问日志与浏览器历史，属于拿安全换方便，不能这么干。
+  // 所以这种部署退化为定时拉全量 —— 数据照样是新的，只是放弃推送的秒级实时。
+  // 同源部署（含 Nginx 反代）仍然走 SSE，这是绝大多数情况。
+  if (API_BASE) { startPolling(); return; }
   if (window.__es && window.__es.readyState !== 2) return;
-  const es = new EventSource('/api/events');
+  const es = new EventSource(U('/api/events'));
   window.__es = es;
 
   es.onopen = function () {
@@ -1057,12 +1093,12 @@ function connectEvents() {
 }
 
 // loadFull 全量对账。正常情况下用不到（建连就有全量首帧）；
-// 只在增量早于首帧、或需要人工核对时调用。
+// 只在增量早于首帧、或需要人工核对时调用。跨源模式下它是唯一的数据来源。
 async function loadFull() {
   if (loadingNow) return;              // 上一轮还没回来就别叠加请求
   loadingNow = true;
   try {
-    const r = await fetch('/api/dashboard', { cache: 'no-store' });
+    const r = await fetch(U('/api/dashboard'), { cache: 'no-store', headers: H() });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const secs = await r.json();
     for (const k in SECTIONS) {
@@ -1080,7 +1116,7 @@ async function loadFull() {
   }
 }
 
-// ---------- 实时状态：SSE + 秒级计时（不轮询）----------
+// ---------- 实时状态：SSE + 秒级计时（同源）；跨源退化为定时同步 ----------
 // 数据只走 SSE 推送；页面不主动拉。这里只维护一个"多久没收到推送"的计数器：
 //   - 每次收到 init / dash 事件都刷新 lastEventAt
 //   - 每秒重画一次文字（已更新 X 秒前）
@@ -1089,14 +1125,26 @@ var lastEventAt = 0;
 var STALE_SEC = 60;
 var loadingNow = false;      // loadFull 防重入（曾因漏声明导致整页白屏）
 
+// startPolling 只在跨源模式用：每 5 秒拉一次 /api/dashboard。
+function startPolling() {
+  if (window.__poll) return;
+  POLL_MODE = true;
+  $('dot').className = 'ddot ok';
+  $('updated').textContent = '定时同步 · 跨源模式';
+  const tick = () => { if (!loadingNow) loadFull(); };
+  window.__poll = setInterval(tick, 5000);
+  tick();
+}
+
 function reconnectEvents() {
+  if (POLL_MODE) return;      // 跨源模式没有事件流可重连
   try { if (window.__es) window.__es.close(); } catch (e) {}
   window.__es = null;
   connectEvents();
 }
 
 function tickSinceUpdate() {
-  if (!lastEventAt) return;
+  if (POLL_MODE || !lastEventAt) return;
   var sec = Math.max(0, Math.floor((Date.now() - lastEventAt) / 1000));
   var el = $('updated');
   if (sec <= 2) {
@@ -1173,9 +1221,9 @@ async function forceRelease(folderId, owner) {
     return;
   }
   try {
-    const r = await fetch('/api/claim/release', {
+    const r = await fetch(U('/api/claim/release'), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: H({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ folderId: folderId, force: true }),
     });
     const d = await r.json().catch(() => ({}));

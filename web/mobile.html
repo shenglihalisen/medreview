@@ -249,6 +249,14 @@
     <input id="setUser" />
     <label style="font-size:13px;color:var(--fg2)">下载口令</label>
     <input id="setToken" />
+    <!-- 与桌面版侧栏的「已完成全部」是同一个引子：
+         勾上=退出时清理密码与审阅数据，不勾=保留。手机上也能收尾，
+         否则只用手机审完一轮的人还得回电脑上点一下。 -->
+    <label style="display:flex;gap:8px;align-items:flex-start;font-size:13px;color:var(--fg);margin-top:4px">
+      <input type="checkbox" id="setDone" style="width:auto;margin-top:2px">
+      <span>已完成全部<br><span class="muted" style="font-size:12px">勾选后：关闭服务时清理密码与审阅记录</span></span>
+    </label>
+    <div class="muted" id="setDoneMsg" style="font-size:12px;min-height:16px"></div>
     <button class="primary" id="setSave">保存并重新连接</button>
     <button id="setClose" style="text-align:center;color:var(--fg2)">取消</button>
   </div>
@@ -932,6 +940,39 @@
   $('btnSettings').onclick=function(){
     $('setBase').value=S.base; $('setUser').value=S.user; $('setToken').value=S.token;
     $('setSheet').classList.remove('hidden');
+    loadDoneState();
+  };
+
+  // 「已完成全部」引子：读一次当前状态，勾选时写回。
+  // 后端对写操作有额外校验（本机 / 持主口令 / 已登录），被拒时如实提示，
+  // 不做"看起来勾上了其实没生效"的假乐观。
+  function loadDoneState(){
+    var cb=$('setDone'), msg=$('setDoneMsg');
+    if(!cb) return;
+    msg.textContent='';
+    api('/api/session/done').then(function(d){
+      cb.checked=!!(d&&d.done);
+    }).catch(function(e){
+      msg.textContent='状态读取失败：'+(e.message||e);
+    });
+  }
+  var doneBusy=false;
+  $('setDone').onchange=function(){
+    var cb=$('setDone'), msg=$('setDoneMsg');
+    if(doneBusy) return;
+    var want=cb.checked;
+    cb.checked=!want;
+    if(want && !confirm('勾选「已完成全部」后，关闭服务时会清理超管密码与审阅记录，下次启动是全新状态。确定吗？')){
+      return;
+    }
+    doneBusy=true;
+    msg.textContent='提交中…';
+    postApi('/api/session/done',{done:want}).then(function(){
+      cb.checked=want;
+      msg.textContent = want ? '已记录：关闭时清理' : '已取消：关闭时保留';
+    }).catch(function(e){
+      msg.textContent='设置失败：'+(e.message||e);
+    }).then(function(){ doneBusy=false; });
   };
   $('setClose').onclick=function(){ $('setSheet').classList.add('hidden'); };
   $('setSave').onclick=function(){

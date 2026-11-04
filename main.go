@@ -301,7 +301,22 @@ func main() {
 	}
 
 	// 上次会话若勾过「已完成全部」，先把没清干净的补清掉（强杀场景）
-	maybeCleanupOnStart(cfg)
+	if maybeCleanupOnStart(cfg) {
+		// 清理会把 users.json 也删掉。如果它是用户用 -auth-file 显式指定的，
+		// 后面 newApp 还会拿这个路径去加载认证，结果就是「读完数据、清完库，
+		// 服务再也起不来」—— 比不清理更糟。
+		// 这里把已经不存在的那条路径摘掉，让本次以「全新、未启用登录」启动；
+		// 要不要重新设密码由启动器（-setup）或用户自己决定。
+		if cfg.authFile != "" && !fileExists(cfg.authFile) {
+			log.Printf("「已完成全部」清理后 %s 已不存在：本次不启用登录；需要登录请重新运行 -setup", cfg.authFile)
+			cfg.authFile = ""
+		}
+		// 公网模式的安全底线不能被「清理」绕过：没有账号文件就别开公网监听。
+		if cfg.publicMode && cfg.authSingle == "" && cfg.authFile == "" && cfg.adminUser == "" {
+			log.Println("公网模式要求登录，但清理后没有可用的账号文件；请先运行 -setup 设置超管密码再启动")
+			fatalExit()
+		}
+	}
 
 	a, err := newApp(cfg, logRing500, logFilePath)
 	if err != nil {
