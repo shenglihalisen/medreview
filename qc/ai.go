@@ -34,18 +34,11 @@ import (
 	"time"
 )
 
-// AI 类别与输入规格（必须与训练导出的 ONNX 一致）。
-const (
-	AIInputSize  = 224
-	AIClassBlur  = "blur"
-	AIClassNoise = "noise"
-	AIClassDirt  = "dirt"
-)
-
-// AIClasses 模型输出顺序（logits 列序）。
-var AIClasses = [3]string{AIClassBlur, AIClassNoise, AIClassDirt}
+// AIInputSize 模型输入边长（必须与训练导出一致）。
+const AIInputSize = 224
 
 // AIScores 三类「AI 怀疑度」（0~1，sigmoid 后的概率）。
+// 列序与模型输出一致：blur / noise / dirt（exposure 列模型里有，但本项目不接管）。
 type AIScores struct {
 	Blur  float64 `json:"blur"`
 	Noise float64 `json:"noise"`
@@ -118,7 +111,7 @@ func (a *AIDetector) ensure() error {
 	if err != nil {
 		return err
 	}
-	cmd.Stderr = nil // 子进程错误走 stdout 的 {"error":...}，stderr 不参与协议
+	cmd.Stderr = os.Stderr // 协议走 stdout；stderr 直接透传，qcai 崩了能在主日志里看到 traceback
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("启动 qcai: %w", err)
 	}
