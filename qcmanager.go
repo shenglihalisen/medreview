@@ -64,10 +64,21 @@ type QCManager struct {
 // NewQCManager 装配 QC 检测器。
 // images 传nil 时 QC 会退回「自己转临时 JPEG」的老路；传了就优先复用预览缓存
 // （见 QCManager.images 与 ImageService.QCSource 的说明，能省掉一次 RAW 解码）。
-func NewQCManager(ffmpeg, ffprobe, magick, cacheDir string, store *Store, hub *Hub, images *ImageService) *QCManager {
+func NewQCManager(ffmpeg, ffprobe, magick, cacheDir string, store *Store, hub *Hub, images *ImageService, aiEnabled bool) *QCManager {
 	parent, cancel := context.WithCancel(context.Background())
+	svc := qc.NewQCService(ffmpeg, ffprobe, cacheDir)
+	if aiEnabled {
+		// 内嵌资源释放 + 自检；任何一步失败都只关掉 AI 这一路，QC 其余照常。
+		exe, model, dll := embeddedAIFiles()
+		if det, err := qc.NewAIDetector(exe, model, dll); err != nil {
+			log.Printf("AI 检测器未启用：%v", err)
+		} else {
+			svc.SetAI(det)
+			log.Printf("AI 检测器已启用（qcai + qc_quality.onnx）")
+		}
+	}
 	return &QCManager{
-		svc:       qc.NewQCService(ffmpeg, ffprobe, cacheDir),
+		svc:       svc,
 		store:     store,
 		hub:       hub,
 		magick:    magick,

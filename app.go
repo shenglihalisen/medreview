@@ -56,6 +56,7 @@ type appConfig struct {
 	adminUser  string // -admin-user：启动时问密码的唯一超管
 	adminHash  string // 上面那个账号的 bcrypt 哈希（内存态，不落盘）
 	vjobs      int    // 视频预热并发数
+	qcAI       bool   // -qc-ai：启用 AI 质量检测（第 8 个检测器）
 	qcHW       string // QC 视频解码："cpu"=软解；"cuda"/"qsv"/"d3d11va"=只用那一条；"auto"=探测择优。对应 -qcdec
 	encHW      string // 视频转码编码："cpu"=libx264；"nvenc"/"qsv"/"amf"=只用那一个；"auto"=择优。对应 -enc
 	autoClose  bool   // QC 全部完成后自动退出（硬件测试脚本用）
@@ -143,7 +144,7 @@ func newApp(cfg appConfig, logs *logRing, logPath string) (*app, error) {
 	}
 	// 把 a.images 传给 QC：QC 对相机 RAW 可以直接复用预览缓存，
 	// 省掉第二次 ImageMagick 解码（解码 RAW 是整条链路最贵的一步）。
-	a.qc = NewQCManager(findTool("ffmpeg"), findTool("ffprobe"), findTool("magick"), cfg.cacheDir, a.store, a.hub, a.images)
+	a.qc = NewQCManager(findTool("ffmpeg"), findTool("ffprobe"), findTool("magick"), cfg.cacheDir, a.store, a.hub, a.images, cfg.qcAI)
 
 	tok := cfg.token
 	if tok == "" {

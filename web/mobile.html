@@ -564,7 +564,7 @@
     if(qc.dup)t.push('重复'); if(qc.corrupt)t.push('损坏'); if(qc.blank)t.push('空镜'+num(qc.blankConf));
     if(qc.dirt)t.push('脏污'+num(qc.dirtConf)); if(qc.blur)t.push('模糊'+num(qc.blurConf));
     if(qc.expUnder)t.push('欠曝'+num(qc.expMean)); else if(qc.expOver)t.push('过曝'+num(qc.expMean)); else if(qc.exposure)t.push('曝光'+num(qc.expMean));
-    if(qc.noise)t.push('噪点'+num(qc.noiseConf)); if(qc.shake)t.push('抖动'+num(qc.shakeAmp));
+    if(qc.noise)t.push('噪点'+num(qc.noiseConf)); if(qc.shake)t.push('抖动'+num(qc.shakeAmp)); if(qc.ai)t.push('AI'+num(Math.max(qc.aiBlur||0,qc.aiNoise||0,qc.aiDirt||0)));
     return t;
   }
 

@@ -252,6 +252,8 @@ select, input[type=text] {
 .qc-exposure { background: #4fd1e0; }
 .qc-noise { background: #9aa0b5; color: #fff !important; }
 .qc-shake { background: #7fe3a8; }
+/* 第 8 个检测器（AI 怀疑）：默认关闭，-qc-ai 开启后才出现 */
+.qc-ai { background: #e8a33d; color: #3a2400 !important; }
 
 /* QC 判定阈值调节弹窗（检测算法零改动，只调"是/否"判定线） */
 .th-row { display: flex; align-items: center; gap: 8px; padding: 7px 0; border-bottom: 1px dashed var(--border-strong); }
@@ -1505,6 +1507,11 @@ html.is-phone #name-ok { min-height: 44px; }
     }
     if (qc.flags & 64) out.push(["噪点", "qc-noise", qcNum(qc.noiseConf)]);
     if (qc.flags & 128) out.push(["抖动", "qc-shake", qcNum(qc.shakeAmp)]);
+    // bit8=AI 怀疑（-qc-ai 开启后才有）：显示三类里最高的一项分数
+    if (qc.flags & 256) {
+      var aiMax = Math.max(qc.aiBlur || 0, qc.aiNoise || 0, qc.aiDirt || 0);
+      out.push(["AI怀疑", "qc-ai", qcNum(aiMax)]);
+    }
     return out;
   }
 

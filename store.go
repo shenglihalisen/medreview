@@ -80,6 +80,11 @@ type QCInfo struct {
 	DirtConf  float64 `json:"dirtConf,omitempty"`
 	ExpMean   float64 `json:"expMean,omitempty"`
 	ShakeAmp  float64 `json:"shakeAmp,omitempty"`
+	// AI 怀疑度（第 8 个检测器，默认关闭）：三类 sigmoid 分数，仅展示用。
+	AI      bool    `json:"ai,omitempty"`
+	AIBlur  float64 `json:"aiBlur,omitempty"`
+	AINoise float64 `json:"aiNoise,omitempty"`
+	AIDirt  float64 `json:"aiDirt,omitempty"`
 }
 
 // qcInfoFromResult 由 qc.QCResult 构造前端 DTO。
@@ -100,6 +105,7 @@ func qcInfoFromResult(r *qc.QCResult) *QCInfo {
 		Exposure: r.Flags&qc.FlagExposure != 0,
 		Noise:    r.Flags&qc.FlagNoise != 0,
 		Shake:    r.Flags&qc.FlagShake != 0,
+		AI:       r.Flags&qc.FlagAISuspect != 0,
 	}
 	if r.LensDirt != nil {
 		info.Boxes = r.LensDirt.Boxes
@@ -124,6 +130,9 @@ func qcInfoFromResult(r *qc.QCResult) *QCInfo {
 	}
 	if r.Shake != nil {
 		info.ShakeAmp = r.Shake.Amp
+	}
+	if r.AI != nil {
+		info.AIBlur, info.AINoise, info.AIDirt = r.AI.Scores.Blur, r.AI.Scores.Noise, r.AI.Scores.Dirt
 	}
 	return info
 }

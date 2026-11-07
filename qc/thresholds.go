@@ -19,6 +19,11 @@ type Thresholds struct {
 	ExpOver    float64 `json:"expOver"`    // 平均亮度 > 此值 且近白像素>80% 判过曝
 	ShakeRms   float64 `json:"shakeRms"`   // 帧间平移RMS > 此值（且翻转率过半）判抖动
 	DupSim     float64 `json:"dupSim"`     // 相似度：显著差异像素占比 ≤ 1-DupSim 判重复（0.95 ⇔ 差异≤5%）
+	// AI 怀疑度阈值（第 8 个检测器，默认关闭）：sigmoid 概率 > 此值判中。
+	// 默认值 = qc-ml 训练时合成验证集负类 98 分位（FPR≤2% 口径），见 thresholds.json。
+	AIBlur  float64 `json:"aiBlur"`  // 模糊怀疑度 >
+	AINoise float64 `json:"aiNoise"` // 噪点怀疑度 >
+	AIDirt  float64 `json:"aiDirt"`  // 镜头脏污怀疑度 >
 }
 
 // DefaultThresholds 校准默认值 = 原 qc.go 编译期常量。
@@ -31,6 +36,9 @@ func DefaultThresholds() Thresholds {
 		ExpOver:    ExpOverMean,
 		ShakeRms:   ShakeRmsThresh,
 		DupSim:     1 - DupPixelDiffThresh, // 差异占比 0.05 ⇔ 相似度 0.95
+		AIBlur:     0.97, // qc-ml 训练阈值（cnn-20261107-173740）
+		AINoise:    0.35,
+		AIDirt:     0.88,
 	}
 }
 
@@ -52,6 +60,9 @@ func ThresholdSpecs() map[string]ThresholdSpec {
 		"expOver":    {Min: 90, Max: 220, Step: 5, Higher: "loose"},
 		"shakeRms":   {Min: 0.3, Max: 6, Step: 0.1, Higher: "loose"},
 		"dupSim":     {Min: 0.5, Max: 1, Step: 0.01, Higher: "strict"},
+		"aiBlur":     {Min: 0.05, Max: 0.99, Step: 0.01, Higher: "strict"},
+		"aiNoise":    {Min: 0.05, Max: 0.99, Step: 0.01, Higher: "strict"},
+		"aiDirt":     {Min: 0.05, Max: 0.99, Step: 0.01, Higher: "strict"},
 	}
 }
 
@@ -74,6 +85,9 @@ func ClampThresholds(t Thresholds) Thresholds {
 	t.ExpOver = cl(t.ExpOver, s["expOver"])
 	t.ShakeRms = cl(t.ShakeRms, s["shakeRms"])
 	t.DupSim = cl(t.DupSim, s["dupSim"])
+	t.AIBlur = cl(t.AIBlur, s["aiBlur"])
+	t.AINoise = cl(t.AINoise, s["aiNoise"])
+	t.AIDirt = cl(t.AIDirt, s["aiDirt"])
 	return t
 }
 
@@ -90,7 +104,8 @@ func VersionFor(t Thresholds) int {
 	}
 	h := fnv.New64a()
 	var b [8]byte
-	for _, v := range []float64{t.BlurLapStd, t.NoiseFloor, t.BlankStd, t.ExpUnder, t.ExpOver, t.ShakeRms, t.DupSim} {
+	for _, v := range []float64{t.BlurLapStd, t.NoiseFloor, t.BlankStd, t.ExpUnder, t.ExpOver, t.ShakeRms, t.DupSim,
+		t.AIBlur, t.AINoise, t.AIDirt} {
 		binary.LittleEndian.PutUint64(b[:], math.Float64bits(v))
 		h.Write(b[:])
 	}

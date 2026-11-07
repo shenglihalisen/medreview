@@ -49,12 +49,13 @@ const (
 	FlagExposure              // 曝光异常（欠曝 / 过曝）
 	FlagNoise                 // 噪点（高感颗粒 / 压缩噪声）
 	FlagShake                 // 抖动（手持晃动：帧间整体平移往复震荡）
+	FlagAISuspect             // AI 怀疑（小模型综合判断；默认关闭，-qc-ai 开启）
 )
 
 // FlagIssueMask 所有「质量问题」位的合集。
 // 注意**不含重复**：重复只是冗余，片子本身没问题，不该混进"只看问题件"里
 // （否则整理重复素材时会被一堆好片淹没）。
-const FlagIssueMask = FlagCorrupted | FlagBlank | FlagLensDirt | FlagBlur | FlagExposure | FlagNoise | FlagShake
+const FlagIssueMask = FlagCorrupted | FlagBlank | FlagLensDirt | FlagBlur | FlagExposure | FlagNoise | FlagShake | FlagAISuspect
 
 // 阈值（待真实素材校准，宁漏勿滥）
 const (
@@ -163,6 +164,7 @@ type QCResult struct {
 	Exposure  *ExposureOut `json:"exposure,omitempty"`
 	Noise     *DetectorOut `json:"noise,omitempty"`
 	Shake     *ShakeOut    `json:"shake,omitempty"`
+	AI        *AIOut       `json:"ai,omitempty"` // AI 怀疑度（默认关闭；detail 里可见三类分数）
 
 	// 以下都是校准/调试用的原始指标，不入库（json:"-"）。
 	GrayStd     float64 `json:"-"` // 全局灰度标准差（空镜指标）
@@ -191,6 +193,10 @@ type QCService struct {
 	hwPickedAt time.Time // 上次结论是什么时候测出来的（只用于日志）
 
 	ms MetaStore // 可选：持久化的键/值通道，用来复用上次探测结论
+
+	// ai 是第 8 个检测器（小模型）。nil = 未启用/加载失败，全部调用方判空。
+	// 与 ffmpeg 不同，它默认不初始化：要 -qc-ai 显式开启。
+	ai *AIDetector
 
 	// th 是"是/否"判定阈值（运行时可调，默认=编译期校准常量，见 thresholds.go）。
 	// thMu 保护读写；每次检测取快照——改阈值不影响正在算的那个文件，下一次检测生效。
@@ -316,6 +322,15 @@ func (s *QCService) SetHWChoice(choice string) {
 	s.hwChoice = choice
 	s.hwMu.Unlock()
 }
+
+// SetAI 挂载第 8 个检测器（小模型）。传 nil = 关闭（默认）。
+// 加载失败由调用方决定降级：这里只存指针，检测路径判空。
+func (s *QCService) SetAI(d *AIDetector) {
+	s.ai = d
+}
+
+// AIAvailable AI 检测器是否就绪。
+func (s *QCService) AIAvailable() bool { return s.ai != nil }
 
 // Available 是否具备 ffmpeg（可正常运行检测）。
 func (s *QCService) Available() bool { return s.ffmpeg != "" }
@@ -861,6 +876,20 @@ func (s *QCService) judgeFrame(ctx context.Context, gray []byte, src string) *QC
 		} else {
 			// 必须留痕：静默跳过会让"没测成"看起来跟"测过、没问题"一模一样
 			log.Printf("QC: %s 细节灰度(%d)提取失败，跳过模糊/噪点检测: %v", src, DetailSize, derr)
+		}
+	}
+
+	// 第 8 个检测器：AI 怀疑度（默认关闭，-qc-ai 开启；视频路径不跑，见 ai.go 头注释）。
+	// 三类分数任何一类越过阈值就挂 FlagAISuspect；三类分数原样进 detail。
+	if s.ai != nil {
+		if sc, np, aerr := s.ai.ScoreFile(src); aerr == nil {
+			r.AI = &AIOut{Scores: sc, Patches: np}
+			if sc.Blur > th.AIBlur || sc.Noise > th.AINoise || sc.Dirt > th.AIDirt {
+				r.Flags |= FlagAISuspect
+			}
+		} else {
+			// 同一条原则：留痕。CR3/HEIC 这类 image.Decode 不吃的格式会走到这里。
+			log.Printf("QC: %s AI 检测跳过: %v", src, aerr)
 		}
 	}
 	return r

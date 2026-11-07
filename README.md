@@ -58,6 +58,9 @@ Windows 本地运行的照片 / 视频人工筛选工具。多人按目录并行
 
 ### 2.2 从源码构建
 
+> Windows 构建需要 **gcc（MinGW-w64）**：AI 推理器 `qcai.exe` 走 cgo。用 `./build-windows.sh` 会自动先编 `qcai.exe` 再编主程序（主程序仍是 `CGO_ENABLED=0` 纯静态）。
+
+
 前置：
 
 1. Go 1.26 及以上（不使用 CGO，无需 gcc）。
@@ -198,6 +201,7 @@ ffmpeg 内嵌机制（Windows）：`tools/ffmpeg/` 下的 `ffmpeg.exe`、`ffprob
 | `-vkeep` | false | 保留上一轮转码产物（默认每次启动清理） |
 | `-open` | false | 启动后自动打开审阅页 |
 | `-log` | 自动选择 | 日志文件路径；依次尝试当前目录 → 程序目录 → 临时目录 |
+| `-qc-ai` | false | 启用 AI 质量检测（第 8 个检测器，模型随包内嵌）。默认关闭；开启后每张图片多一次 ~50ms 推理 |
 
 退出行为：正常退出（Ctrl+C、关闭窗口、点停止服务）清空转码与预览缓存；被强制结束（直接关闭黑窗口、任务管理器结束）不执行清理，残留由下次启动兜底清理。
 
@@ -316,12 +320,19 @@ check_token_random.py      下载口令随机性、启动器不写死口令
 | 欠曝 / 过曝 exposure | 严重偏暗或偏亮 | 欠曝 / 过曝标记 + 平均亮度 + 近黑 / 近白像素占比 |
 | 噪点 noise | 高 ISO 噪点严重 | 置信度（平坦块噪声底线） |
 | 抖动 shake | **视频**帧间整体平移的往复震荡（防抖检测） | 振幅 RMS（1px ≈ 画面 1.5%） |
+| **AI 怀疑 ai** | 小模型（MobileNetV3-Small）对模糊 / 噪点 / 脏污的综合判断，**默认关闭，需 `-qc-ai`** | 三类 sigmoid 分数 |
 
-> **校准说明**：上述阈值**尚未用真实素材校准**。当前策略遵循「宁漏勿滥」，并预留 2–3× 余量，避免误伤正常照片。正式发布前需用真实素材集校准后再上线。
+> **AI 检测器实测（2026-11-07）**：在 150 张**未参与训练**的真实照片上（`本地素材库` held-out），三类分数分布为
+> blur p95=0.674 / p99=0.898 / max=0.911、noise p95=0.273 / p99=0.379 / max=0.687、dirt p95=0.393 / p99=0.829 / max=0.941。
+> 默认阈值（0.97 / 0.35 / 0.88）取在 p99 与 max 之上，因此**在实际素材上命中率很低**——这是「宁漏勿滥」的有意选择。
+> 尤其 **blur 与真实景深虚化高度重叠**（干净照片里就有 0.911 的虚化背景），基本无法单帧区分，建议维持保守值。
+> 需要更灵敏可在仪表盘调低 `aiBlur` / `aiNoise` / `aiDirt`（范围 0.05~0.99）。
+
+> **校准说明**：上述（规则）阈值**尚未用真实素材校准**。当前策略遵循「宁漏勿滥」，并预留 2–3× 余量，避免误伤正常照片。正式发布前需用真实素材集校准后再上线。
 
 ### 11.2 结果展示
 
-- **卡片徽章**：缩略图右上角的 `.qc-stack` 叠放徽章，每个检出的问题一个标签（损坏 / 重复 / 空镜 / 脏污 / 模糊 / 曝光 / 噪点）。
+- **卡片徽章**：缩略图右上角的 `.qc-stack` 叠放徽章，每个检出的问题一个标签（损坏 / 重复 / 空镜 / 脏污 / 模糊 / 曝光 / 噪点；开启 `-qc-ai` 后多一个「AI 怀疑」）。
 - **灯箱红框**：灯箱大图里，镜头脏点以半透明红框叠加在脏点实际位置；按 **H 键**可隐藏 / 恢复红框（偏好会被记住）。
 - **问题清单 CSV**：下载页「问题清单」按钮导出 `qc-report.csv`，含损坏 / 重复 / 空镜 / 镜头脏污 / 模糊 / 欠曝 / 过曝 / 噪点的文件清单（含本目录及子目录），Excel 可直接打开。
 
@@ -532,6 +543,7 @@ ffmpeg embedding (Windows): `ffmpeg.exe` and `ffprobe.exe` under `tools/ffmpeg/`
 | `-vkeep` | false | Keep the previous run's transcode outputs (cleared on every start by default) |
 | `-open` | false | Open the review page automatically after start |
 | `-log` | Auto | Log file path; tries the current directory → program directory → temp directory |
+| `-qc-ai` | false | Enable AI quality detection (8th detector, model embedded). Off by default; adds ~50ms inference per image |
 
 Exit behavior: a normal exit (Ctrl+C, closing the window, stop button) clears transcode and preview caches; a forced kill skips cleanup, and leftovers are cleaned on the next start.
 
@@ -650,12 +662,21 @@ Quality checks (QC) are the **visual annotation layer** of the review workflow: 
 | under/over-exposure | Severely dark or bright images | Flag + mean luma + near-black/near-white pixel ratio |
 | noise | Severe high-ISO noise | Confidence (flat-block noise floor) |
 | shake | **Video** back-and-forth global motion between frames (stabilization check) | RMS amplitude (1 px ≈ 1.5% of the frame) |
+| **ai** | Lightweight model (MobileNetV3-Small) verdict on blur / noise / dirt; **off by default, needs `-qc-ai`** | Three sigmoid scores |
 
-> **Calibration note**: these thresholds are **not yet calibrated against real-world footage**. The current policy is "prefer misses over false positives", with 2–3× headroom so normal photos are not flagged. Calibrate on a real media set before a formal release.
+> **AI detector, measured 2026-11-07**: on 150 **held-out** real photos, the score distributions were
+> blur p95=0.674 / p99=0.898 / max=0.911, noise p95=0.273 / p99=0.379 / max=0.687,
+> dirt p95=0.393 / p99=0.829 / max=0.941. The defaults (0.97 / 0.35 / 0.88) sit above p99 and max,
+> so **hits are rare on real material** — a deliberate "prefer misses" choice. In particular **blur
+> overlaps real bokeh almost completely** (clean photos already score 0.911 on defocused backgrounds),
+> so it cannot be separated from real blur in a single frame. Lower `aiBlur` / `aiNoise` / `aiDirt`
+> (0.05-0.99) in the dashboard if you want more sensitivity.
+
+> **Calibration note**: these (rule) thresholds are **not yet calibrated against real-world footage**. The current policy is "prefer misses over false positives", with 2–3× headroom so normal photos are not flagged. Calibrate on a real media set before a formal release.
 
 ### 11.2 Presentation
 
-- **Card badges**: a `.qc-stack` in the top-right corner of each thumbnail, one label per detected issue (corrupted / duplicate / blank / dirt / blur / exposure / noise).
+- **Card badges**: a `.qc-stack` in the top-right corner of each thumbnail, one label per detected issue (corrupted / duplicate / blank / dirt / blur / exposure / noise; plus "AI suspect" when `-qc-ai` is on).
 - **Lightbox boxes**: in the lightbox, lens-dirt is drawn as translucent boxes over the actual spots; press **H** to hide/show them (the preference is remembered).
 - **Issue list CSV**: the "issue list" button on the download page exports `qc-report.csv` listing corrupted / duplicate / blank / lens-dirt / blur / under- and over-exposed files (this folder and subfolders); opens directly in Excel.
 
