@@ -245,7 +245,10 @@ func newApp(cfg appConfig, logs *logRing, logPath string) (*app, error) {
 	// 并把生效 qc_version 接到阈值指纹上：运行中改阈值 → 旧结果失配自动重跑；
 	// 改回默认 → 指纹归零，未被覆盖的默认结果直接复用。见 qc/thresholds.go。
 	a.qc.LoadThresholdsStored()
-	a.store.SetQCVersionFn(func() int { return qc.VersionFor(a.qc.CurrentThresholds()) })
+	a.store.SetQCVersionFn(func() int {
+		// AI 开关会改变 flags 语义（多出 bit8），必须进版本号，否则开关前后结果互串
+		return qc.VersionForAI(a.qc.CurrentThresholds(), a.qc.AIAvailable())
+	})
 	// 扫描完成后 invalidate 掉目录计数缓存，并按用户定的顺序串行跑四步：
 	// ① 图片转码预热 → ② 图片 QC → ③ 视频转码 → ④ 视频 QC（2026-10-01）。
 	// 全在一个后台 goroutine 里顺序执行 —— 视频转码/QC 都是重活，和图片的混跑

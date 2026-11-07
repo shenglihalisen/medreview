@@ -91,6 +91,24 @@ func ClampThresholds(t Thresholds) Thresholds {
 	return t
 }
 
+// VersionForAI 把「AI 检测是否真的启用」也混进版本号。
+//
+// 为什么必须：-qc-ai 会改变 flags 的语义（多出 bit8）。若版本号不变，
+// 开过一轮再关掉，库里那批带 bit8 的结果会被判为"有效"直接复用，徽章一直挂着；
+// 反过来先关后开也不会补算。
+// AI 版落在 [1e9+1, 2e9)，与 VersionFor 的指纹区 [QCVersion, 1e9+QCVersion] 不重叠。
+func VersionForAI(t Thresholds, aiOn bool) int {
+	if !aiOn {
+		return VersionFor(t)
+	}
+	h := fnv.New64a()
+	var b [8]byte
+	binary.LittleEndian.PutUint64(b[:], uint64(VersionFor(t)))
+	h.Write(b[:])
+	h.Write([]byte("ai-on"))
+	return 1_000_000_001 + int(h.Sum64()%999_999_999)
+}
+
 // VersionFor 返回"算法版本 + 阈值指纹"，写进 qc 表的 qc_version 列：
 //
 //   - 默认阈值 → 正好 QCVersion（与历史行为一致，默认阈值的结果可复用）；

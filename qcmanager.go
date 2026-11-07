@@ -497,6 +497,14 @@ func (m *QCManager) SetHWChoice(choice string) {
 }
 
 // SetMetaStore 给 QC 服务接上持久化通道：硬件探测结论存库，下次启动直接复用。
+// AIAvailable 第 8 个检测器是否真的就绪（决定 qc_version 要不要带 AI 标记）。
+func (m *QCManager) AIAvailable() bool {
+	if m == nil || m.svc == nil {
+		return false
+	}
+	return m.svc.AIAvailable()
+}
+
 func (m *QCManager) SetMetaStore(ms qc.MetaStore) {
 	if m.svc != nil {
 		m.svc.SetMetaStore(ms)

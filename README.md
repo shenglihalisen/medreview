@@ -201,7 +201,7 @@ ffmpeg 内嵌机制（Windows）：`tools/ffmpeg/` 下的 `ffmpeg.exe`、`ffprob
 | `-vkeep` | false | 保留上一轮转码产物（默认每次启动清理） |
 | `-open` | false | 启动后自动打开审阅页 |
 | `-log` | 自动选择 | 日志文件路径；依次尝试当前目录 → 程序目录 → 临时目录 |
-| `-qc-ai` | false | 启用 AI 质量检测（第 8 个检测器，模型随包内嵌）。默认关闭；开启后每张图片多一次 ~50ms 推理 |
+| `-qc-ai` | false | 启用 AI 质量检测（第 8 个检测器，模型随包内嵌）。默认关闭；开启后每张图片多约 1 秒（大头是 4K 图解码，不是推理） |
 
 退出行为：正常退出（Ctrl+C、关闭窗口、点停止服务）清空转码与预览缓存；被强制结束（直接关闭黑窗口、任务管理器结束）不执行清理，残留由下次启动兜底清理。
 
@@ -322,7 +322,7 @@ check_token_random.py      下载口令随机性、启动器不写死口令
 | 抖动 shake | **视频**帧间整体平移的往复震荡（防抖检测） | 振幅 RMS（1px ≈ 画面 1.5%） |
 | **AI 怀疑 ai** | 小模型（MobileNetV3-Small）对模糊 / 噪点 / 脏污的综合判断，**默认关闭，需 `-qc-ai`** | 三类 sigmoid 分数 |
 
-> **AI 检测器实测（2026-11-07）**：在 150 张**未参与训练**的真实照片上（`本地素材库` held-out），三类分数分布为
+> **AI 检测器实测（2026-11-07）**：在 150 张**未参与训练**的真实照片上（本地素材库 held-out），三类分数分布为
 > blur p95=0.674 / p99=0.898 / max=0.911、noise p95=0.273 / p99=0.379 / max=0.687、dirt p95=0.393 / p99=0.829 / max=0.941。
 > 默认阈值（0.97 / 0.35 / 0.88）取在 p99 与 max 之上，因此**在实际素材上命中率很低**——这是「宁漏勿滥」的有意选择。
 > 尤其 **blur 与真实景深虚化高度重叠**（干净照片里就有 0.911 的虚化背景），基本无法单帧区分，建议维持保守值。
@@ -346,7 +346,10 @@ check_token_random.py      下载口令随机性、启动器不写死口令
 
 AGPL-3.0（GNU Affero General Public License v3.0），见 [LICENSE](./LICENSE)。
 
-第三方组件：构建时通过 `go:embed` 打包的 `ffmpeg` / `ffprobe`（[FFmpeg](https://ffmpeg.org/)，依其自身许可证发布，本项目不随仓库分发，需自行准备）。
+第三方组件：
+- `ffmpeg` / `ffprobe`（[FFmpeg](https://ffmpeg.org/)）：构建时通过 `go:embed` 打包，依其自身许可证发布，本项目不随仓库分发，需自行准备。
+- `onnxruntime.dll`（[ONNX Runtime](https://github.com/microsoft/onnxruntime)，MIT）：随仓库分发，许可证见 `tools/onnxruntime/LICENSE` 与 `ThirdPartyNotices.txt`。
+- QC 小模型 `qc_quality.onnx`：本项目用自有素材训练产出（见私有仓库 qc-ml），无第三方授权限制。
 
 ---
 
@@ -543,7 +546,7 @@ ffmpeg embedding (Windows): `ffmpeg.exe` and `ffprobe.exe` under `tools/ffmpeg/`
 | `-vkeep` | false | Keep the previous run's transcode outputs (cleared on every start by default) |
 | `-open` | false | Open the review page automatically after start |
 | `-log` | Auto | Log file path; tries the current directory → program directory → temp directory |
-| `-qc-ai` | false | Enable AI quality detection (8th detector, model embedded). Off by default; adds ~50ms inference per image |
+| `-qc-ai` | false | Enable AI quality detection (8th detector, model embedded). Off by default; adds ~1s per image (dominated by 4K decoding, not inference) |
 
 Exit behavior: a normal exit (Ctrl+C, closing the window, stop button) clears transcode and preview caches; a forced kill skips cleanup, and leftovers are cleaned on the next start.
 
@@ -690,4 +693,7 @@ Quality checks (QC) are the **visual annotation layer** of the review workflow: 
 
 AGPL-3.0 (GNU Affero General Public License v3.0). See [LICENSE](./LICENSE).
 
-Third-party components: `ffmpeg` / `ffprobe` ([FFmpeg](https://ffmpeg.org/)) embedded at build time via `go:embed`. They are distributed under their own licenses and are not shipped with this repository — provide them yourself.
+Third-party components:
+- `ffmpeg` / `ffprobe` ([FFmpeg](https://ffmpeg.org/)): embedded at build time via `go:embed`, distributed under their own licenses, **not** shipped with this repository — provide them yourself.
+- `onnxruntime.dll` ([ONNX Runtime](https://github.com/microsoft/onnxruntime), MIT): **shipped** with this repository; see `tools/onnxruntime/LICENSE` and `ThirdPartyNotices.txt`.
+- The QC model `qc_quality.onnx` was trained in-house on our own material (see the private qc-ml repo) and carries no third-party licensing terms.

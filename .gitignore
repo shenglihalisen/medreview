@@ -7,6 +7,9 @@ dist/
 # 以便克隆后开箱即用（QC 解 RAW/HEIC/AVIF/JXL/PSD 必需）。
 # 注意：ffmpeg/ffprobe 因体积过大（~210MB）按工具链单独放置、不入库（见下方 tools/ffmpeg/）。
 !tools/imagemagick/magick.exe
+# AI 推理器必须入库：主程序用 go:embed 引用它，缺文件会直接编译失败。
+# 3.2MB，随源码走；dll 与 onnx 同理（见 tools/onnxruntime、tools/qcml）。
+!tools/qcml/qcai.exe
 *.bak*
 *.prev
 *.lnk
