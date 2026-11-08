@@ -9,11 +9,14 @@ UTF-8 的中文会显示成乱码（.bat 的硬规矩，Go/Python 源码不受�
 """
 import os
 import shutil
+import sys
 import zipfile
 
 EXE = "medreview.exe"
 BAT = "start.bat"
-DST = "dist/medreview-portable-v1.2.0.zip"
+# 版本号从命令行取，避免每次发版都改脚本：python _verify/_pack.py 1.4.0
+VER = sys.argv[1] if len(sys.argv) > 1 else "1.4.0"
+DST = "dist/medreview-portable-v%s.zip" % VER
 # 包里的批处理用这个名字（用户习惯中文名；内容仍是纯 ASCII 提示，
 # 文件名是 UTF-8 路径，zip 本身支持，不受 GBK 影响）
 BAT_IN_ZIP = "启动审阅.bat"
