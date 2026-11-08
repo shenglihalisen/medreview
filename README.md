@@ -201,7 +201,7 @@ ffmpeg 内嵌机制（Windows）：`tools/ffmpeg/` 下的 `ffmpeg.exe`、`ffprob
 | `-vkeep` | false | 保留上一轮转码产物（默认每次启动清理） |
 | `-open` | false | 启动后自动打开审阅页 |
 | `-log` | 自动选择 | 日志文件路径；依次尝试当前目录 → 程序目录 → 临时目录 |
-| `-qc-ai` | false | 启用 AI 质量检测（第 8 个检测器，模型随包内嵌）。默认关闭；开启后每张图片多约 1 秒（大头是 4K 图解码，不是推理） |
+| `-qc-ai` | false | 启用 AI 质量检测（第 8 个检测器，模型随包内嵌）。默认关闭；3 路推理进程池，20 张 4K 图实测每张只多约 0.1 秒（与规则 QC 的时间重叠） |
 
 退出行为：正常退出（Ctrl+C、关闭窗口、点停止服务）清空转码与预览缓存；被强制结束（直接关闭黑窗口、任务管理器结束）不执行清理，残留由下次启动兜底清理。
 
@@ -320,7 +320,7 @@ check_token_random.py      下载口令随机性、启动器不写死口令
 | 欠曝 / 过曝 exposure | 严重偏暗或偏亮 | 欠曝 / 过曝标记 + 平均亮度 + 近黑 / 近白像素占比 |
 | 噪点 noise | 高 ISO 噪点严重 | 置信度（平坦块噪声底线） |
 | 抖动 shake | **视频**帧间整体平移的往复震荡（防抖检测） | 振幅 RMS（1px ≈ 画面 1.5%） |
-| **AI 怀疑 ai** | 小模型（MobileNetV3-Small）对模糊 / 噪点 / 脏污的综合判断，**默认关闭，需 `-qc-ai`** | 三类 sigmoid 分数 |
+| **AI 怀疑 ai** | 小模型（MobileNetV3-Small）对模糊 / 噪点 / 脏污的综合判断；**图片与视频都跑**（视频抽 5 帧取均值）；默认关闭，需 `-qc-ai` | 三类 sigmoid 分数 |
 
 > **AI 检测器实测（2026-11-07）**：在 150 张**未参与训练**的真实照片上（本地素材库 held-out），三类分数分布为
 > blur p95=0.674 / p99=0.898 / max=0.911、noise p95=0.273 / p99=0.379 / max=0.687、dirt p95=0.393 / p99=0.829 / max=0.941。
@@ -546,7 +546,7 @@ ffmpeg embedding (Windows): `ffmpeg.exe` and `ffprobe.exe` under `tools/ffmpeg/`
 | `-vkeep` | false | Keep the previous run's transcode outputs (cleared on every start by default) |
 | `-open` | false | Open the review page automatically after start |
 | `-log` | Auto | Log file path; tries the current directory → program directory → temp directory |
-| `-qc-ai` | false | Enable AI quality detection (8th detector, model embedded). Off by default; adds ~1s per image (dominated by 4K decoding, not inference) |
+| `-qc-ai` | false | Enable AI quality detection (8th detector, model embedded). Off by default; a 3-process inference pool adds only ~0.1s per image on 20×4K photos (overlapped with rule QC) |
 
 Exit behavior: a normal exit (Ctrl+C, closing the window, stop button) clears transcode and preview caches; a forced kill skips cleanup, and leftovers are cleaned on the next start.
 
@@ -665,7 +665,7 @@ Quality checks (QC) are the **visual annotation layer** of the review workflow: 
 | under/over-exposure | Severely dark or bright images | Flag + mean luma + near-black/near-white pixel ratio |
 | noise | Severe high-ISO noise | Confidence (flat-block noise floor) |
 | shake | **Video** back-and-forth global motion between frames (stabilization check) | RMS amplitude (1 px ≈ 1.5% of the frame) |
-| **ai** | Lightweight model (MobileNetV3-Small) verdict on blur / noise / dirt; **off by default, needs `-qc-ai`** | Three sigmoid scores |
+| **ai** | Lightweight model (MobileNetV3-Small) verdict on blur / noise / dirt; runs on **both images and videos** (5 sampled frames, averaged); **off by default, needs `-qc-ai`** | Three sigmoid scores |
 
 > **AI detector, measured 2026-11-07**: on 150 **held-out** real photos, the score distributions were
 > blur p95=0.674 / p99=0.898 / max=0.911, noise p95=0.273 / p99=0.379 / max=0.687,

@@ -1124,6 +1124,8 @@ func (s *QCService) runVideo(ctx context.Context, src string) (*QCResult, error)
 			r.Noise = &DetectorOut{Conf: r.NoiseFloor}
 		}
 	}
+	// 第 8 个检测器：视频也跑（抽 5 帧彩色，与图片同口径取 mean）
+	s.judgeVideoAI(ctx, src, r)
 	return r, nil
 }
 

@@ -10,16 +10,16 @@ import (
 // 真实推理需要 dll+模型，放在集成测试里，不塞进单元测试。
 
 func TestNewAIDetectorRejectsEmptyPaths(t *testing.T) {
-	if _, err := NewAIDetector("", "", ""); err == nil {
+	if _, err := NewAIDetector("", "", "", 1); err == nil {
 		t.Fatal("三个路径全空时应报错")
 	}
-	if _, err := NewAIDetector("only.exe", "", ""); err == nil {
+	if _, err := NewAIDetector("only.exe", "", "", 1); err == nil {
 		t.Fatal("缺 model/dll 时应报错")
 	}
 }
 
 func TestNewAIDetectorRejectsMissingFiles(t *testing.T) {
-	if _, err := NewAIDetector("nope.exe", "nope.onnx", "nope.dll"); err == nil {
+	if _, err := NewAIDetector("nope.exe", "nope.onnx", "nope.dll", 1); err == nil {
 		t.Fatal("文件不存在时应报错，而不是返回可用检测器")
 	}
 }
@@ -34,7 +34,7 @@ func TestNewAIDetectorRejectsEmptyFile(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := NewAIDetector(exe, mdl, dll); err == nil {
+	if _, err := NewAIDetector(exe, mdl, dll, 1); err == nil {
 		t.Fatal("空文件应被拒绝")
 	}
 }

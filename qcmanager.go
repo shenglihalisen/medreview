@@ -70,7 +70,8 @@ func NewQCManager(ffmpeg, ffprobe, magick, cacheDir string, store *Store, hub *H
 	if aiEnabled {
 		// 内嵌资源释放 + 自检；任何一步失败都只关掉 AI 这一路，QC 其余照常。
 		exe, model, dll := embeddedAIFiles()
-		if det, err := qc.NewAIDetector(exe, model, dll); err != nil {
+		// 池大小与 QC 并发数一致：runAll 的 sem 是 3，池开 3 才能吃满
+		if det, err := qc.NewAIDetector(exe, model, dll, 3); err != nil {
 			log.Printf("AI 检测器未启用：%v", err)
 		} else {
 			svc.SetAI(det)

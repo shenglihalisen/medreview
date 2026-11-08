@@ -29,8 +29,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -63,14 +65,24 @@ type AIDetector struct {
 	model string
 	dll   string
 
-	mu  sync.Mutex // 单进程串行；QC 并发时排队
-	cmd *exec.Cmd
-	in  io.WriteCloser
-	out *bufio.Reader
+	// pool 是 qcai 进程池。QC 的 runAll 本来就是 3 路并发（sem 容量 3），
+	// 单进程 + 一把大锁会把并发压回串行 —— 池化后吞吐直接 ×3。
+	// 每个进程各自加载一份 dll/模型（约 120MB 常驻），池大小与 QC 并发数一致。
+	pool chan *aiProc
+
+	mu     sync.Mutex
+	closed bool
 
 	// modelHash 模型文件指纹：换模型必须让旧 QC 结果失效，否则新模型的分母配旧
 	// 模型的分数，语义是错的。由 VersionForAI 混进 qc_version。
 	modelHash string
+}
+
+// aiProc 一个常驻 qcai 进程。
+type aiProc struct {
+	cmd *exec.Cmd
+	in  io.WriteCloser
+	out *bufio.Reader
 }
 
 // aiReply qcai 的 stdout 契约（单行 JSON）。
@@ -81,7 +93,7 @@ type aiReply struct {
 }
 
 // NewAIDetector 校验三个文件存在且 qcai 能跑起来。失败返回 error，调用方降级。
-func NewAIDetector(exe, model, dll string) (*AIDetector, error) {
+func NewAIDetector(exe, model, dll string, workers int) (*AIDetector, error) {
 	if exe == "" || model == "" || dll == "" {
 		return nil, fmt.Errorf("AI 推理器路径为空（exe=%q model=%q dll=%q）", exe, model, dll)
 	}
@@ -104,7 +116,20 @@ func NewAIDetector(exe, model, dll string) (*AIDetector, error) {
 	if h, herr := fileSHA256(model); herr == nil {
 		hash = h
 	}
-	return &AIDetector{exe: exe, model: model, dll: dll, modelHash: hash}, nil
+	if workers < 1 {
+		workers = 1
+	}
+	a := &AIDetector{exe: exe, model: model, dll: dll, modelHash: hash,
+		pool: make(chan *aiProc, workers)}
+	for i := 0; i < workers; i++ {
+		p, perr := a.start()
+		if perr != nil {
+			a.Close()
+			return nil, fmt.Errorf("启动第 %d 个推理进程: %w", i+1, perr)
+		}
+		a.pool <- p
+	}
+	return a, nil
 }
 
 // ModelHash 模型文件前 16 位 sha256（空 = 没算出来，不影响检测）。
@@ -128,41 +153,105 @@ func fileSHA256(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil))[:16], nil
 }
 
-// ensure 懒启动常驻进程；已有进程直接返回。
-func (a *AIDetector) ensure() error {
-	if a.cmd != nil {
-		return nil
-	}
+// start 拉起一个 qcai 常驻进程。
+func (a *AIDetector) start() (*aiProc, error) {
 	cmd := exec.Command(a.exe, "-dll", a.dll, "-model", a.model, "-stdin")
 	in, err := cmd.StdinPipe()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	out, err := cmd.StdoutPipe()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	cmd.Stderr = os.Stderr // 协议走 stdout；stderr 直接透传，qcai 崩了能在主日志里看到 traceback
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("启动 qcai: %w", err)
+		return nil, fmt.Errorf("启动 qcai: %w", err)
 	}
-	a.cmd, a.in, a.out = cmd, in, bufio.NewReader(out)
-	return nil
+	return &aiProc{cmd: cmd, in: in, out: bufio.NewReader(out)}, nil
 }
 
-// kill 终止常驻进程；下次调用会重新拉起。
-func (a *AIDetector) kill() {
-	if a.cmd == nil {
+// kill 终止单个进程。
+func (p *aiProc) kill() {
+	if p == nil {
 		return
 	}
-	if a.in != nil {
-		a.in.Close()
+	if p.in != nil {
+		p.in.Close()
 	}
-	if a.cmd.Process != nil {
-		a.cmd.Process.Kill()
+	if p.cmd != nil && p.cmd.Process != nil {
+		p.cmd.Process.Kill()
+		p.cmd.Wait()
 	}
-	a.cmd.Wait()
-	a.cmd, a.in, a.out = nil, nil, nil
+}
+
+// retire 处死坏进程并补一个新鲜的，保持池容量不缩水。
+func (a *AIDetector) retire(p *aiProc) {
+	p.kill()
+	a.mu.Lock()
+	closed := a.closed
+	a.mu.Unlock()
+	if closed {
+		return
+	}
+	if np, err := a.start(); err == nil {
+		select {
+		case a.pool <- np:
+		default:
+			np.kill() // 池满（并发收尾竞态）：多出来的直接关掉
+		}
+	}
+}
+
+// judgeVideoAI 视频：抽代表帧跑 AI，与图片同口径（mean）。
+//
+// 抽帧**保持原分辨率**：缩放会把"糊"变清楚，与训练时的 224 原图像素口径对不上，
+// 判断会系统性地偏松。每 100 帧取一帧（25fps ≈ 4 秒），最多 5 帧。
+func (s *QCService) judgeVideoAI(ctx context.Context, src string, r *QCResult) {
+	if s.ai == nil || s.ffmpeg == "" {
+		return
+	}
+	th := s.CurrentThresholds()
+	dir, err := os.MkdirTemp("", "qcai-vid-")
+	if err != nil {
+		log.Printf("QC: %s AI 抽帧目录创建失败: %v", src, err)
+		return
+	}
+	defer os.RemoveAll(dir)
+	pat := filepath.Join(dir, "f%03d.jpg")
+	cmd := exec.CommandContext(ctx, s.ffmpeg,
+		"-v", "error", "-i", src,
+		"-vf", "select=not(mod(n\\,100))",
+		"-frames:v", "5", "-q:v", "3", pat)
+	if out, cerr := cmd.CombinedOutput(); cerr != nil {
+		log.Printf("QC: %s AI 抽帧失败: %v: %s", src, cerr, strings.TrimSpace(string(out)))
+		return
+	}
+	files, _ := filepath.Glob(filepath.Join(dir, "f*.jpg"))
+	if len(files) == 0 {
+		log.Printf("QC: %s AI 抽帧为空（视频太短？），跳过 AI", src)
+		return
+	}
+	var sc AIScores
+	n := 0
+	for _, f := range files {
+		if got, _, e := s.ai.ScoreFile(f); e == nil {
+			sc.Blur += got.Blur
+			sc.Noise += got.Noise
+			sc.Dirt += got.Dirt
+			n++
+		}
+	}
+	if n == 0 {
+		return
+	}
+	sc.Blur /= float64(n)
+	sc.Noise /= float64(n)
+	sc.Dirt /= float64(n)
+	r.AI = &AIOut{Scores: sc, Patches: n}
+	if sc.Blur > th.AIBlur || sc.Noise > th.AINoise || sc.Dirt > th.AIDirt {
+		r.Flags |= FlagAISuspect
+	}
 }
 
 // ScoreFile 对一张图片跑推理，返回 mean 口径的三类分数与参与平均的块数。
@@ -170,14 +259,23 @@ func (a *AIDetector) ScoreFile(path string) (AIScores, int, error) {
 	if a == nil {
 		return AIScores{}, 0, fmt.Errorf("AI 检测器不可用")
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	if err := a.ensure(); err != nil {
-		return AIScores{}, 0, err
+	// 从池里借一个进程（池空则等待，最多 30s）
+	var p *aiProc
+	select {
+	case p = <-a.pool:
+	case <-time.After(30 * time.Second):
+		return AIScores{}, 0, fmt.Errorf("等待 AI 推理进程超时（池已满 30s）")
 	}
-	if _, err := fmt.Fprintln(a.in, path); err != nil {
-		a.kill()
+	bad := true
+	defer func() {
+		if bad {
+			a.retire(p)
+		} else {
+			a.pool <- p
+		}
+	}()
+
+	if _, err := fmt.Fprintln(p.in, path); err != nil {
 		return AIScores{}, 0, fmt.Errorf("写入 qcai: %w", err)
 	}
 	// 读是阻塞的，用 goroutine + 超时兜底：卡死时杀进程，不让 QC 整体拖住。
@@ -187,13 +285,12 @@ func (a *AIDetector) ScoreFile(path string) (AIScores, int, error) {
 	}
 	ch := make(chan readResult, 1)
 	go func() {
-		line, err := a.out.ReadString('\n')
+		line, err := p.out.ReadString('\n')
 		ch <- readResult{line, err}
 	}()
 	select {
 	case res := <-ch:
 		if res.err != nil {
-			a.kill()
 			return AIScores{}, 0, fmt.Errorf("读取 qcai 输出: %w", res.err)
 		}
 		var rep aiReply
@@ -201,21 +298,31 @@ func (a *AIDetector) ScoreFile(path string) (AIScores, int, error) {
 			return AIScores{}, 0, fmt.Errorf("解析 qcai 输出: %w（原文 %q）", err, res.line)
 		}
 		if rep.Error != "" {
+			// 单文件失败（CR3/HEIC 解不了）不代表进程坏了，进程还能继续用
+			bad = false
 			return AIScores{}, 0, fmt.Errorf("qcai: %s", rep.Error)
 		}
+		bad = false
 		return rep.Scores, rep.Patches, nil
 	case <-time.After(60 * time.Second):
-		a.kill()
 		return AIScores{}, 0, fmt.Errorf("qcai 超时（60s）")
 	}
 }
 
-// Close 关闭常驻进程（进程退出前调用）。
+// Close 关闭池里所有进程（进程退出前调用）。
 func (a *AIDetector) Close() {
 	if a == nil {
 		return
 	}
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.kill()
+	a.closed = true
+	a.mu.Unlock()
+	for {
+		select {
+		case p := <-a.pool:
+			p.kill()
+		default:
+			return
+		}
+	}
 }
