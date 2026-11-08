@@ -332,6 +332,14 @@ func (s *QCService) SetAI(d *AIDetector) {
 // AIAvailable AI 检测器是否就绪。
 func (s *QCService) AIAvailable() bool { return s.ai != nil }
 
+// AIModelHash 当前模型指纹（换模型后旧 QC 结果必须重算）。
+func (s *QCService) AIModelHash() string {
+	if s.ai == nil {
+		return ""
+	}
+	return s.ai.ModelHash()
+}
+
 // Available 是否具备 ffmpeg（可正常运行检测）。
 func (s *QCService) Available() bool { return s.ffmpeg != "" }
 

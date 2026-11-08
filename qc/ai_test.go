@@ -81,3 +81,20 @@ func TestAIThresholdsWithinSpec(t *testing.T) {
 		t.Fatal("默认阈值经过 Clamp 后不应变化")
 	}
 }
+
+// 换模型必须让旧 QC 结果失效：版本号要跟着模型指纹变。
+func TestVersionForAITracksModelHash(t *testing.T) {
+	th := DefaultThresholds()
+	a := VersionForAI(th, true, "aaaa1111")
+	b := VersionForAI(th, true, "bbbb2222")
+	if a == b {
+		t.Fatal("换模型后 qc_version 不变 —— 旧结果会被当成有效复用")
+	}
+	if a < 1_000_000_001 || a > 2_000_000_000 {
+		t.Fatalf("AI 版版本号 %d 落在预期区间 [1e9+1, 2e9) 之外", a)
+	}
+	// 关闭 AI 时必须与旧版逐字节一致（默认用户零影响）
+	if got := VersionForAI(th, false, "aaaa1111"); got != VersionFor(th) {
+		t.Fatalf("关闭 AI 时版本号应等于 VersionFor，得到 %d vs %d", got, VersionFor(th))
+	}
+}

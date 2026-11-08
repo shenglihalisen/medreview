@@ -60,9 +60,9 @@ func ThresholdSpecs() map[string]ThresholdSpec {
 		"expOver":    {Min: 90, Max: 220, Step: 5, Higher: "loose"},
 		"shakeRms":   {Min: 0.3, Max: 6, Step: 0.1, Higher: "loose"},
 		"dupSim":     {Min: 0.5, Max: 1, Step: 0.01, Higher: "strict"},
-		"aiBlur":     {Min: 0.05, Max: 0.99, Step: 0.01, Higher: "strict"},
-		"aiNoise":    {Min: 0.05, Max: 0.99, Step: 0.01, Higher: "strict"},
-		"aiDirt":     {Min: 0.05, Max: 0.99, Step: 0.01, Higher: "strict"},
+		"aiBlur":     {Min: 0.05, Max: 0.99, Step: 0.01, Higher: "loose"},
+		"aiNoise":    {Min: 0.05, Max: 0.99, Step: 0.01, Higher: "loose"},
+		"aiDirt":     {Min: 0.05, Max: 0.99, Step: 0.01, Higher: "loose"},
 	}
 }
 
@@ -97,7 +97,7 @@ func ClampThresholds(t Thresholds) Thresholds {
 // 开过一轮再关掉，库里那批带 bit8 的结果会被判为"有效"直接复用，徽章一直挂着；
 // 反过来先关后开也不会补算。
 // AI 版落在 [1e9+1, 2e9)，与 VersionFor 的指纹区 [QCVersion, 1e9+QCVersion] 不重叠。
-func VersionForAI(t Thresholds, aiOn bool) int {
+func VersionForAI(t Thresholds, aiOn bool, modelHash string) int {
 	if !aiOn {
 		return VersionFor(t)
 	}
@@ -106,6 +106,8 @@ func VersionForAI(t Thresholds, aiOn bool) int {
 	binary.LittleEndian.PutUint64(b[:], uint64(VersionFor(t)))
 	h.Write(b[:])
 	h.Write([]byte("ai-on"))
+	// 模型也要进指纹：换模型后旧分数语义变了，必须让那批结果失配重算。
+	h.Write([]byte(modelHash))
 	return 1_000_000_001 + int(h.Sum64()%999_999_999)
 }
 

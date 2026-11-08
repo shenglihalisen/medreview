@@ -24,6 +24,8 @@ package qc
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -65,6 +67,10 @@ type AIDetector struct {
 	cmd *exec.Cmd
 	in  io.WriteCloser
 	out *bufio.Reader
+
+	// modelHash 模型文件指纹：换模型必须让旧 QC 结果失效，否则新模型的分母配旧
+	// 模型的分数，语义是错的。由 VersionForAI 混进 qc_version。
+	modelHash string
 }
 
 // aiReply qcai 的 stdout 契约（单行 JSON）。
@@ -94,7 +100,32 @@ func NewAIDetector(exe, model, dll string) (*AIDetector, error) {
 	if err != nil {
 		return nil, fmt.Errorf("qcai 自检失败: %v: %s", err, strings.TrimSpace(string(out)))
 	}
-	return &AIDetector{exe: exe, model: model, dll: dll}, nil
+	hash := ""
+	if h, herr := fileSHA256(model); herr == nil {
+		hash = h
+	}
+	return &AIDetector{exe: exe, model: model, dll: dll, modelHash: hash}, nil
+}
+
+// ModelHash 模型文件前 16 位 sha256（空 = 没算出来，不影响检测）。
+func (a *AIDetector) ModelHash() string {
+	if a == nil {
+		return ""
+	}
+	return a.modelHash
+}
+
+func fileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16], nil
 }
 
 // ensure 懒启动常驻进程；已有进程直接返回。

@@ -247,7 +247,7 @@ func newApp(cfg appConfig, logs *logRing, logPath string) (*app, error) {
 	a.qc.LoadThresholdsStored()
 	a.store.SetQCVersionFn(func() int {
 		// AI 开关会改变 flags 语义（多出 bit8），必须进版本号，否则开关前后结果互串
-		return qc.VersionForAI(a.qc.CurrentThresholds(), a.qc.AIAvailable())
+		return qc.VersionForAI(a.qc.CurrentThresholds(), a.qc.AIAvailable(), a.qc.AIModelHash())
 	})
 	// 扫描完成后 invalidate 掉目录计数缓存，并按用户定的顺序串行跑四步：
 	// ① 图片转码预热 → ② 图片 QC → ③ 视频转码 → ④ 视频 QC（2026-10-01）。

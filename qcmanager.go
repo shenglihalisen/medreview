@@ -505,6 +505,14 @@ func (m *QCManager) AIAvailable() bool {
 	return m.svc.AIAvailable()
 }
 
+// AIModelHash 当前模型指纹（换模型 → qc_version 变 → 旧结果重算）。
+func (m *QCManager) AIModelHash() string {
+	if m == nil || m.svc == nil {
+		return ""
+	}
+	return m.svc.AIModelHash()
+}
+
 func (m *QCManager) SetMetaStore(ms qc.MetaStore) {
 	if m.svc != nil {
 		m.svc.SetMetaStore(ms)
