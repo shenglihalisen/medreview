@@ -36,9 +36,12 @@ func DefaultThresholds() Thresholds {
 		ExpOver:    ExpOverMean,
 		ShakeRms:   ShakeRmsThresh,
 		DupSim:     1 - DupPixelDiffThresh, // 差异占比 0.05 ⇔ 相似度 0.95
-		AIBlur:     0.97, // qc-ml 训练阈值（cnn-20261107-173740）
-		AINoise:    0.35,
-		AIDirt:     0.88,
+		// 部署阈值 = 150 张**未参与训练**的真实照片上的 p98（≈2% 误报），
+		// 不是训练时的合成验证集分位数：合成负类比真实照片"干净"得多，
+		// 直接套会严重偏差（实测 noise 套 0.184 在真实照片上误报 5.8%）。
+		AIBlur:  0.86,
+		AINoise: 0.29,
+		AIDirt:  0.66,
 	}
 }
 

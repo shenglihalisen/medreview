@@ -324,8 +324,10 @@ check_token_random.py      下载口令随机性、启动器不写死口令
 
 > **AI 检测器实测（2026-11-07）**：在 150 张**未参与训练**的真实照片上（本地素材库 held-out），三类分数分布为
 > blur p95=0.674 / p99=0.898 / max=0.911、noise p95=0.273 / p99=0.379 / max=0.687、dirt p95=0.393 / p99=0.829 / max=0.941。
-> 默认阈值（0.97 / 0.35 / 0.88）取在 p99 与 max 之上，因此**在实际素材上命中率很低**——这是「宁漏勿滥」的有意选择。
-> 尤其 **blur 与真实景深虚化高度重叠**（干净照片里就有 0.911 的虚化背景），基本无法单帧区分，建议维持保守值。
+> **默认阈值取真实照片的 p98（≈2% 误报），不是训练时的合成验证集分位数**：合成负类比真实照片干净得多，
+> 直接套会严重偏差（实测 noise 套 0.184 在真实照片上误报 5.8%）。当前默认 **blur 0.86 / noise 0.29 / dirt 0.66**
+> （模型 cnn-20261108-135354，20 轮 / 8000 patch）。
+> 尤其 **blur 与真实景深虚化高度重叠**（干净照片里 blur 分数最高 0.957，就是虚化背景），单帧无法彻底区分。
 > 需要更灵敏可在仪表盘调低 `aiBlur` / `aiNoise` / `aiDirt`（范围 0.05~0.99）。
 
 > **校准说明**：上述（规则）阈值**尚未用真实素材校准**。当前策略遵循「宁漏勿滥」，并预留 2–3× 余量，避免误伤正常照片。正式发布前需用真实素材集校准后再上线。
@@ -667,7 +669,12 @@ Quality checks (QC) are the **visual annotation layer** of the review workflow: 
 | shake | **Video** back-and-forth global motion between frames (stabilization check) | RMS amplitude (1 px ≈ 1.5% of the frame) |
 | **ai** | Lightweight model (MobileNetV3-Small) verdict on blur / noise / dirt; runs on **both images and videos** (5 sampled frames, averaged); **off by default, needs `-qc-ai`** | Three sigmoid scores |
 
-> **AI detector, measured 2026-11-07**: on 150 **held-out** real photos, the score distributions were
+> **Default thresholds are the 98th percentile of real photos (≈2% false positives), not the synthetic
+> validation quantiles** — synthetic negatives are far cleaner than real photos (applying noise=0.184 to
+> real photos gave 5.8% FPR). Current defaults: **blur 0.86 / noise 0.29 / dirt 0.66**
+> (model cnn-20261108-135354, 20 epochs / 8000 patches).
+
+> **Earlier measurement (2026-11-07)**: on 150 **held-out** real photos, the score distributions were
 > blur p95=0.674 / p99=0.898 / max=0.911, noise p95=0.273 / p99=0.379 / max=0.687,
 > dirt p95=0.393 / p99=0.829 / max=0.941. The defaults (0.97 / 0.35 / 0.88) sit above p99 and max,
 > so **hits are rare on real material** — a deliberate "prefer misses" choice. In particular **blur
