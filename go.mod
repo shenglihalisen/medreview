@@ -3,8 +3,8 @@ module medreview
 go 1.26.0
 
 require (
+	github.com/getcharzp/onnxruntime_purego v1.28.0
 	github.com/wailsapp/wails/v2 v2.16.0
-	github.com/yalue/onnxruntime_go v1.38.0
 	golang.org/x/crypto v0.57.0
 	golang.org/x/sys v0.48.0
 	modernc.org/sqlite v1.34.1
@@ -14,6 +14,7 @@ require (
 	git.sr.ht/~jackmordaunt/go-toast/v2 v2.0.3 // indirect
 	github.com/bep/debounce v1.2.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/ebitengine/purego v0.9.0 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/godbus/dbus/v5 v5.1.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
@@ -29,7 +30,6 @@ require (
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v0.1.9 // indirect
-	github.com/pixiv/go-libjpeg v0.0.0-20190822045933-3da21a74767d // indirect
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect

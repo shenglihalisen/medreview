@@ -61,9 +61,8 @@ type AIOut struct {
 // 之后每张图只付解码 + 推理的时间。每张图重启进程会让 1000 张素材的 QC
 // 多花十几分钟，所以这里维护一个进程，出错时自动重启。
 type AIDetector struct {
-	exe   string
 	model string
-	dll   string
+	lib   string
 
 	// pool 是 qcai 进程池。QC 的 runAll 本来就是 3 路并发（sem 容量 3），
 	// 单进程 + 一把大锁会把并发压回串行 —— 池化后吞吐直接 ×3。
@@ -93,11 +92,11 @@ type aiReply struct {
 }
 
 // NewAIDetector 校验三个文件存在且 qcai 能跑起来。失败返回 error，调用方降级。
-func NewAIDetector(exe, model, dll string, workers int) (*AIDetector, error) {
-	if exe == "" || model == "" || dll == "" {
-		return nil, fmt.Errorf("AI 推理器路径为空（exe=%q model=%q dll=%q）", exe, model, dll)
+func NewAIDetector(model, lib string, workers int) (*AIDetector, error) {
+	if model == "" || lib == "" {
+		return nil, fmt.Errorf("AI 资源路径为空（model=%q lib=%q）", model, lib)
 	}
-	for _, p := range []string{exe, model, dll} {
+	for _, p := range []string{model, lib} {
 		st, err := os.Stat(p)
 		if err != nil {
 			return nil, fmt.Errorf("缺少 %s: %w", p, err)
@@ -108,7 +107,12 @@ func NewAIDetector(exe, model, dll string, workers int) (*AIDetector, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, exe, "-selftest", "-dll", dll, "-model", model).CombinedOutput()
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("取自身路径: %w", err)
+	}
+	out, err := exec.CommandContext(ctx, exe, "-qcai-worker", "-selftest",
+		"-lib", lib, "-model", model).CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("qcai 自检失败: %v: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -119,7 +123,7 @@ func NewAIDetector(exe, model, dll string, workers int) (*AIDetector, error) {
 	if workers < 1 {
 		workers = 1
 	}
-	a := &AIDetector{exe: exe, model: model, dll: dll, modelHash: hash,
+	a := &AIDetector{model: model, lib: lib, modelHash: hash,
 		pool: make(chan *aiProc, workers)}
 	for i := 0; i < workers; i++ {
 		p, perr := a.start()
@@ -155,7 +159,12 @@ func fileSHA256(path string) (string, error) {
 
 // start 拉起一个 qcai 常驻进程。
 func (a *AIDetector) start() (*aiProc, error) {
-	cmd := exec.Command(a.exe, "-dll", a.dll, "-model", a.model, "-stdin")
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("取自身路径: %w", err)
+	}
+	cmd := exec.Command(exe, "-qcai-worker", "-stdin",
+		"-lib", a.lib, "-model", a.model)
 	in, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err

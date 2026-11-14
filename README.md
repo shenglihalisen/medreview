@@ -58,7 +58,10 @@ Windows 本地运行的照片 / 视频人工筛选工具。多人按目录并行
 
 ### 2.2 从源码构建
 
-> Windows 构建需要 **gcc（MinGW-w64）**：AI 推理器 `qcai.exe` 走 cgo。用 `./build-windows.sh` 会自动先编 `qcai.exe` 再编主程序（主程序仍是 `CGO_ENABLED=0` 纯静态）。
+> 全平台统一 `CGO_ENABLED=0`：AI 推理改用纯 Go 的 ONNX Runtime 绑定（purego），
+> **不再需要 gcc / MinGW，也不再有单独的 `qcai.exe`**。主程序把自己以 `-qcai-worker`
+> 再启动一次作为推理子进程，隔离原生库崩溃。每个平台各自内嵌对应的 ONNX Runtime
+> 动态库（Windows `.dll` / Linux `.so` / macOS `.dylib`，ORT 1.23.0）。
 
 
 前置：

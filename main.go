@@ -46,6 +46,11 @@ func checkAddr(addr string) error {
 }
 
 func main() {
+	// AI 推理 worker：主程序把自己再启动一次，隔离原生库崩溃（见 ai_worker.go）。
+	// 必须在全局 flag 解析之前拦截，否则 -lib/-stdin 会被 main 的参数集吃掉。
+	if len(os.Args) > 1 && os.Args[1] == "-qcai-worker" {
+		os.Exit(runAIWorker(os.Args[2:]))
+	}
 	root := flag.String("root", "", "素材根目录；留空则从上次记录读取，或在网页里选择")
 	addr := flag.String("addr", ":8080", "监听地址，例如 :8080 或 0.0.0.0:8080")
 	dbPath := flag.String("db", "medreview.db", "审阅状态数据库路径；默认每次启动自动清空（退出即全清），想跨次保留得显式指定同一个文件")
